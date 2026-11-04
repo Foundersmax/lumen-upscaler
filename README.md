@@ -1,5 +1,7 @@
 # Lumen Upscaler
 
+**Live:** https://foundersmax.github.io/lumen-upscaler/
+
 Upscale videos to 1080p, 2K or 4K in the browser. Everything runs locally on the GPU (WebGL2 + WebCodecs); files never leave the device.
 
 ## Develop
