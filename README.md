@@ -4,7 +4,7 @@
 
 Private, in-browser video tools. Everything runs on the user's device (WebCodecs, WebGL2, WebGPU/WASM); files never leave it.
 
-- **Edit** (`/edit/`): edit video by editing its transcript. On-device Whisper transcription with word timestamps, select words and press Delete to cut, one-click pause trimming and filler removal, undo/redo, playback that skips cuts, waveform timeline, export to MP4/WebM (optionally upscaled), captions (.srt) and transcript (.txt). Animated burned-in captions (6 styles: Highlight, Pop, Box, Clean, Reveal, One word; position, size, length, highlight colour) previewed live over the video. Transcription can be paused and continued later; double-click a word to fix its text; find in transcript with "cut all". Projects are saved in the browser and restored when the same file is reopened.
+- **Edit** (`/edit/`): edit video by editing its transcript. On-device Whisper transcription with word timestamps, select words and press Delete to cut, one-click pause trimming and filler removal, undo/redo, playback that skips cuts, waveform timeline, export to MP4/WebM (optionally upscaled), captions (.srt) and transcript (.txt). Studio voice: on-device noise removal (noise profile learned from the file), a broadcast dynamic-mic voice tone (low cut, proximity warmth, presence lift, smooth top), de-esser, expander, compressor, and BS.1770 loudness normalisation to −14 / −16 LUFS with a −1 dBFS limiter; live preview through an AudioWorklet with hold-to-compare. Animated burned-in captions (6 styles: Highlight, Pop, Box, Clean, Reveal, One word; position, size, length, highlight colour) previewed live over the video. Transcription can be paused and continued later; double-click a word to fix its text; find in transcript with "cut all". Projects are saved in the browser and restored when the same file is reopened.
 - **Upscale** (`/upscale/`): upscale video to 1080p, 2K or 4K with a GPU pipeline (Catmull-Rom with anti-ringing + contrast-adaptive sharpening) and a before/after preview.
 
 ## Develop
@@ -18,6 +18,7 @@ No bundler or dependencies to install. Fetch the pinned third-party builds once,
     edit/, upscale/               tool pages
     src/engine/                   shared: GPU upscaler, chunked output sink, codecs/helpers
     src/upscale/main.js           Upscale page
+    src/audio/                    voice DSP (dsp.js, shared by export, analysis, AudioWorklet preview and Node tests)
     src/edit/                     Edit page: transcript model, audio extraction, Whisper worker, export, storage
     src/styles/app.css            design tokens + components (light and dark)
     scripts/vendor.mjs            fetches pinned third-party builds (sha512-verified) into vendor/ (generated, not committed)

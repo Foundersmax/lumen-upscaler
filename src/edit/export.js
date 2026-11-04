@@ -8,6 +8,8 @@ import {
 import { Upscaler, IDENTITY, FIX_601 } from "../engine/upscaler.js";
 import { BlobSink } from "../engine/blobsink.js";
 import { encodableCodecs, friendly } from "../engine/media.js";
+import { VoiceChain } from "../audio/dsp.js";
+import { toPlanar } from "./enhance.js";
 
 const FADE = 0.006; // seconds of fade at each cut edge, removes clicks
 
@@ -36,6 +38,7 @@ export class ExportCancelled extends Error { constructor() { super("Export cance
  * @param {boolean} o.colorFix apply BT.601 fix for untagged SD sources
  * @param {(p:number, info:{frames:number})=>void} o.onProgress
  * @param {AbortSignal} o.signal
+ * @param {{settings, profile, pre:number, post:number}} [o.audioFx] voice enhancement (see enhance.js)
  * @param {(ranges:[number,number][]) => ((ctx, t:number, w:number, h:number) => void) | null} [o.overlay]
  *   called with the final (frame-snapped) ranges; returns a function that draws on each output frame
  * @returns {Promise<{blob: Blob, codec: string, audio: string|null, audioNote: string}>}
@@ -137,20 +140,19 @@ async function attempt(o, { codec, hw }) {
     const audioLoop = async () => {
       if (!asrc) return;
       const asink = new AudioBufferSink(atrack);
-      let offset = 0, written = 0, sr = 0;
+      const fx = o.audioFx || null;
+      let offset = 0, written = 0;
       for (const [a, b] of ranges) {
         const segLen = b - a;
-        for await (const { buffer, timestamp } of asink.buffers(a, b)) {
-          check();
-          sr = buffer.sampleRate;
-          const ch = buffer.numberOfChannels, len = buffer.length;
-          const i0 = Math.max(0, Math.round((a - timestamp) * sr)), i1 = Math.min(len, Math.round((b - timestamp) * sr));
-          if (i1 <= i0) continue;
-          const n = i1 - i0, data = new Float32Array(ch * n);
-          const segPos0 = (timestamp + i0 / sr - a) * sr, segEnd = segLen * sr, F = FADE * sr;
+        /** Writes planar audio that starts at source time `startT` (already clipped to [a, b]). */
+        const emit = async (chans, sr, startT) => {
+          const n = chans[0].length, ch = chans.length;
+          if (!n) return;
+          const data = new Float32Array(ch * n);
+          const segPos0 = (startT - a) * sr, segEnd = segLen * sr, F = FADE * sr;
           for (let c = 0; c < ch; c++) {
-            const src = buffer.getChannelData(c).subarray(i0, i1), dst = data.subarray(c * n, (c + 1) * n);
-            dst.set(src);
+            const dst = data.subarray(c * n, (c + 1) * n);
+            dst.set(chans[c]);
             const inEnd = Math.min(n, Math.ceil(F - segPos0));                 // fade-in at segment start
             for (let j = 0; j < inEnd; j++) dst[j] *= Math.max(0, (segPos0 + j) / F);
             const outStart = Math.max(0, Math.floor(segEnd - F - segPos0));    // fade-out at segment end
@@ -161,6 +163,42 @@ async function attempt(o, { codec, hw }) {
           const sample = new AudioSample({ data, format: "f32-planar", numberOfChannels: ch, sampleRate: sr, timestamp: written / sr });
           await asrc.add(sample); sample.close();
           written += n;
+        };
+
+        if (!fx) {
+          for await (const { buffer, timestamp } of asink.buffers(a, b)) {
+            check();
+            const sr = buffer.sampleRate;
+            const i0 = Math.max(0, Math.round((a - timestamp) * sr)), i1 = Math.min(buffer.length, Math.round((b - timestamp) * sr));
+            if (i1 > i0) await emit(toPlanar(buffer, i0, i1), sr, timestamp + i0 / sr);
+          }
+        } else {
+          // Voice chain: start 0.5 s early so dynamics settle, and shift by the chain's latency.
+          let chain = null, sr = 0, aIdx = 0, bIdx = 0, outEnd = -Infinity, chCount = 1;
+          const feed = async (chans, n, inStart) => {
+            chain.process(chans, n);
+            const oStart = inStart - chain.latency; // chans now hold output for source samples oStart…
+            const j0 = Math.max(0, aIdx - oStart), j1 = Math.min(n, bIdx - oStart);
+            if (j1 > j0) await emit(chans.map((x) => x.subarray(j0, j1)), sr, (oStart + j0) / sr);
+            outEnd = oStart + n;
+          };
+          let nextIn = 0;
+          for await (const { buffer, timestamp } of asink.buffers(Math.max(0, a - 0.5), b + 0.25)) {
+            check();
+            const chans = toPlanar(buffer);
+            if (!chain) {
+              sr = buffer.sampleRate; chCount = chans.length; aIdx = Math.round(a * sr); bIdx = Math.round(b * sr);
+              chain = new VoiceChain({ sr, channels: chCount, settings: fx.settings, profile: fx.profile, preGainDb: fx.pre, postGainDb: fx.post, limit: true });
+            }
+            const inStart = Math.round(timestamp * sr);
+            await feed(chans, buffer.length, inStart);
+            nextIn = inStart + buffer.length;
+            if (outEnd >= bIdx) break;
+          }
+          if (chain && outEnd < bIdx) { // end of file: flush the chain's delay line with silence
+            const n = chain.latency + 1;
+            await feed(Array.from({ length: chCount }, () => new Float32Array(n)), n, nextIn);
+          }
         }
         offset += segLen;
       }

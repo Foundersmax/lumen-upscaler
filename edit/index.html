@@ -116,6 +116,50 @@
           </div>
         </div>
       </section>
+
+      <section class="card cap-card" id="audCard" aria-label="Studio voice">
+        <div class="cap-head">
+          <div>
+            <div class="cap-title">Studio voice</div>
+            <div class="cap-sub" id="audSub">Remove background noise and get a close-mic podcast sound.</div>
+          </div>
+          <label class="switch" title="Enhance audio"><input type="checkbox" id="audOn" role="switch" disabled><span class="knob" aria-hidden="true"></span><span class="sr">Enhance audio</span></label>
+        </div>
+        <div class="cap-body" id="audBody" hidden>
+          <div class="group">
+            <div class="label">Voice</div>
+            <div class="seg" role="radiogroup" aria-label="Voice tone">
+              <input type="radio" name="audTone" id="atBroadcast" value="broadcast"><label for="atBroadcast">Broadcast<small>dynamic mic</small></label>
+              <input type="radio" name="audTone" id="atClear" value="clear"><label for="atClear">Clear<small>bright</small></label>
+              <input type="radio" name="audTone" id="atNatural" value="natural"><label for="atNatural">Natural<small>as recorded</small></label>
+            </div>
+          </div>
+          <div class="cap-opts">
+            <div class="group">
+              <div class="label">Noise removal</div>
+              <div class="seg" role="radiogroup" aria-label="Noise removal">
+                <input type="radio" name="audNoise" id="anOff" value="off"><label for="anOff">Off</label>
+                <input type="radio" name="audNoise" id="anLight" value="light"><label for="anLight">Light</label>
+                <input type="radio" name="audNoise" id="anStrong" value="strong"><label for="anStrong">Strong</label>
+              </div>
+            </div>
+            <div class="group">
+              <div class="label">Loudness</div>
+              <div class="seg" role="radiogroup" aria-label="Loudness target">
+                <input type="radio" name="audLoud" id="al14" value="-14"><label for="al14">−14<small>video</small></label>
+                <input type="radio" name="audLoud" id="al16" value="-16"><label for="al16">−16<small>podcast</small></label>
+                <input type="radio" name="audLoud" id="alOff" value="off"><label for="alOff">Keep</label>
+              </div>
+            </div>
+          </div>
+          <div class="progress" id="audProgress" hidden>
+            <div class="track"><div class="fill" id="audFill"></div></div>
+            <div class="stats"><span id="audStatus">Analyzing…</span><span id="audPct"></span></div>
+          </div>
+          <div class="aud-stats" id="audStats" hidden></div>
+          <button class="btn ghost" id="audCompare" type="button" disabled>Hold to hear the original</button>
+        </div>
+      </section>
     </div>
 
     <!-- Right: transcript -->
@@ -210,6 +254,7 @@
       </div>
     </div>
     <label class="check"><input type="checkbox" id="xCap"><span>Burn in captions <span class="muted" id="xCapStyle"></span></span></label>
+    <label class="check"><input type="checkbox" id="xAud"><span>Studio voice <span class="muted" id="xAudStyle"></span></span></label>
     <div class="out">
       <span>Output</span><b id="oDims">—</b>
       <span>Length</span><b id="oLen">—</b>

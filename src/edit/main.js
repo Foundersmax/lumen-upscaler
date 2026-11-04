@@ -1,6 +1,8 @@
 // Edit page: transcript-based video editing.
 import { Input, ALL_FORMATS, BlobSource } from "../../vendor/mediabunny.min.mjs";
 import { Doc, sanitizeWords, normWord, mapTime, cutAt, captionCues, toSRT, toText } from "./transcript.js";
+import { analyzeBase, analyzeChain, chainKey, gainsFor } from "./enhance.js";
+import { DEFAULT_AUDIO, NOISE_LEVELS, VOICE_TONES } from "../audio/dsp.js";
 import { CAPTION_STYLES, CAPTION_COLORS, DEFAULT_CAPTIONS, buildCues, mapCues, rangeMapper, drawCaptions, loadCaptionFonts } from "./captions.js";
 import { extractAudio16k, peaks as computePeaks, ASR_RATE } from "./audio.js";
 import { exportEdit, ExportCancelled } from "./export.js";
@@ -17,6 +19,7 @@ const state = {
   wordEls: [], gapEls: new Map(), nowIdx: -1, followUntil: 0,
   find: { hits: [], len: 0, cur: -1 },
   captions: loadCaptionPrefs(), capCues: [],
+  audioFx: loadAudioPrefs(), audioBase: null, chainLufs: {}, audioJob: null,
   transcribing: null, exporting: null, out: null, loadId: 0,
 };
 const busy = () => !!(state.transcribing || state.exporting);
@@ -110,7 +113,7 @@ async function loadFile(file) {
       file, key: projectKey(file), input, atrack: audioOk ? at : null, duration,
       srcW: vt.displayWidth, srcH: vt.displayHeight,
       colorFix: !cs?.matrix && Math.min(vt.codedWidth, vt.codedHeight) < 720,
-      doc: null, cuts: [], kept: [[0, duration]], peaks: null, audio: null, undo: [], redo: [], nowIdx: -1, captions: loadCaptionPrefs(), capCues: [],
+      doc: null, cuts: [], kept: [[0, duration]], peaks: null, audio: null, undo: [], redo: [], nowIdx: -1, captions: loadCaptionPrefs(), capCues: [], audioFx: loadAudioPrefs(), audioBase: null, chainLufs: {},
       url: URL.createObjectURL(file),
     });
     $("player").style.aspectRatio = `${state.srcW} / ${state.srcH}`;
@@ -123,7 +126,12 @@ async function loadFile(file) {
     $("exportOpen").disabled = false;
     updateResOptions();
 
+    state.audioJob?.abort(); state.audioJob = null;
     const saved = await getProject(state.key);
+    if (saved?.audioFx) state.audioFx = { ...DEFAULT_AUDIO, ...saved.audioFx };
+    if (saved?.audioBase?.profile?.power) { state.audioBase = saved.audioBase; state.chainLufs = saved.chainLufs || {}; }
+    syncAudioUI(); configurePreview();
+    if (state.audioFx.on) ensureAudio().catch(() => {});
     if (saved?.doc?.words?.length && Math.abs(saved.doc.duration - duration) < 0.5) {
       state.doc = Doc.fromJSON(saved.doc);
       state.peaks = saved.peaks || null;
@@ -330,10 +338,10 @@ function afterEdit(persist = true) {
   state.kept = doc ? doc.keptRanges(state.cuts) : (state.duration ? [[0, state.duration]] : []);
   state.capCues = doc ? buildCues(doc, state.captions, (t) => mapTime(t, state.cuts)) : [];
   updateClasses(); drawStrip(); updateStats(); updateExportInfo(); updateClock(); updateResume(); setToolsEnabled(); drawCapOverlay(); syncCaptionUI();
-  if (persist && doc && state.key) {
+  if (persist && state.key) {
     clearTimeout(persistTimer);
     $("saved").textContent = "Saving…";
-    const key = state.key, snapshot = { doc: doc.toJSON(), peaks: state.peaks, captions: state.captions };
+    const key = state.key, snapshot = { doc: doc ? doc.toJSON() : null, peaks: state.peaks, captions: state.captions, audioFx: state.audioFx, audioBase: state.audioBase, chainLufs: state.chainLufs };
     persistTimer = setTimeout(async () => {
       const ok = await putProject(key, snapshot);
       $("saved").textContent = ok === null ? "Not saved in this browser" : "Saved";
@@ -535,6 +543,7 @@ $("findCut").onclick = () => {
 const PLAY = '<path d="M3 1.5v11l9-5.5z"/>', PAUSE = '<path d="M2.5 1.5h3v11h-3zM8.5 1.5h3v11h-3z"/>';
 function play() {
   if (!state.file) return;
+  if (state.audioFx.on && !previewGraph) ensurePreviewGraph(); // needs a user gesture, which play is
   const c = cutAt(video.currentTime, state.cuts, 0);
   if (c) video.currentTime = c[1] >= state.duration - 0.05 ? 0 : c[1];
   if (state.kept.length && video.currentTime >= state.kept[state.kept.length - 1][1] - 0.05) video.currentTime = state.kept[0][0];
@@ -767,6 +776,128 @@ function captionOverlay() {
 }
 
 /* =====================================================================
+   Studio voice (audio enhancement)
+   ===================================================================== */
+function loadAudioPrefs() {
+  try { return { ...DEFAULT_AUDIO, ...JSON.parse(store.get("audio", "{}")), on: false }; } catch { return { ...DEFAULT_AUDIO }; }
+}
+function setAudio(patch) {
+  const before = JSON.stringify(state.audioFx);
+  Object.assign(state.audioFx, patch);
+  if (JSON.stringify(state.audioFx) === before) return;
+  store.set("audio", JSON.stringify({ ...state.audioFx, on: undefined }));
+  syncAudioUI(); configurePreview(); afterEdit();
+  if (state.audioFx.on) { ensurePreviewGraph(); ensureAudio().catch(() => {}); }
+}
+for (const [name, key] of [["audTone", "tone"], ["audNoise", "noise"], ["audLoud", "loudness"]])
+  for (const r of document.querySelectorAll(`input[name="${name}"]`)) r.addEventListener("change", () => setAudio({ [key]: r.value }));
+$("audOn").addEventListener("change", () => setAudio({ on: $("audOn").checked }));
+$("xAud").addEventListener("change", () => setAudio({ on: $("xAud").checked }));
+
+function noiseFloorDb(profile) {
+  const P = profile.power, N = profile.n; let sum = 0;
+  for (let k = 1; k < P.length - 1; k++) sum += 2 * P[k];
+  return 10 * Math.log10(Math.max(1e-12, sum / N / (0.375 * N)));
+}
+function syncAudioUI() {
+  const a = state.audioFx, ok = !!state.atrack;
+  $("audOn").disabled = !ok || !!state.exporting; $("audOn").checked = a.on; $("xAud").checked = a.on; $("xAud").disabled = !ok;
+  $("audBody").hidden = !a.on;
+  const set = (name, v) => { const el = document.querySelector(`input[name="${name}"][value="${v}"]`); if (el) el.checked = true; };
+  set("audTone", a.tone); set("audNoise", a.noise); set("audLoud", a.loudness);
+  $("xAudStyle").textContent = `· ${VOICE_TONES[a.tone]?.name}${a.loudness !== "off" ? `, ${a.loudness.replace("-", "−")} LUFS` : ""}`;
+  if (!state.file) $("audSub").textContent = "Remove background noise and get a close-mic podcast sound.";
+  else if (!ok) $("audSub").textContent = "This video has no audio Lumen can read.";
+  else $("audSub").textContent = a.on ? "Playback and export use the enhanced sound." : "Remove background noise and get a close-mic podcast sound.";
+  const ready = audioReady();
+  $("audCompare").disabled = !ready || !previewGraph;
+  const st = $("audStats");
+  if (a.on && state.audioBase) {
+    const b = state.audioBase, g = ready ? gainsFor(b, state.chainLufs[chainKey(a)], a) : null;
+    const out = g ? (g.target ?? b.rawLufs) : null;
+    const nr = NOISE_LEVELS[a.noise];
+    st.hidden = false;
+    st.innerHTML = "";
+    for (const [k, v] of [["Loudness", `${fmtDb(b.rawLufs)} → ${out != null ? fmtDb(out) : "…"}`], ["Room noise", `${fmtDb(noiseFloorDb(b.profile))} dB`], ["Noise cut", nr ? `up to ${nr.floorDb} dB` : "off"]]) {
+      const d = document.createElement("div"), sp = document.createElement("span"), bb = document.createElement("b");
+      sp.textContent = k; bb.textContent = v; d.append(sp, bb); st.append(d);
+    }
+  } else st.hidden = true;
+}
+const fmtDb = (v) => (Number.isFinite(v) ? v.toFixed(1).replace("-", "−") : "—");
+const audioReady = () => !!(state.audioBase && Number.isFinite(state.chainLufs[chainKey(state.audioFx)]));
+
+/** Runs whatever analysis the current settings still need; resolves to the gains. */
+async function ensureAudio(signal) {
+  if (!state.atrack) throw new Error("No audio track.");
+  const want = chainKey(state.audioFx), key = state.key;
+  if (state.audioJob && state.audioJob.want !== want) { state.audioJob.abort(); state.audioJob = null; }
+  if (!audioReady()) {
+    if (!state.audioJob) {
+      const ac = new AbortController();
+      const job = { want, abort: () => ac.abort(), promise: null };
+      const prog = (label) => (p) => { $("audProgress").hidden = false; $("audFill").style.width = (p * 100).toFixed(1) + "%"; $("audStatus").textContent = label; $("audPct").textContent = Math.round(p * 100) + "%"; };
+      job.promise = (async () => {
+        try {
+          if (!state.audioBase) {
+            const base = await analyzeBase(state.atrack, state.duration, prog("Listening to the room noise…"), ac.signal);
+            if (state.key !== key) return;
+            state.audioBase = base; state.chainLufs = {};
+            if (!state.peaks && base.peaks) { state.peaks = base.peaks; drawStrip(); }
+          }
+          const settings = { ...state.audioFx };
+          const lufs = await analyzeChain(state.atrack, state.duration, state.audioBase, settings, prog("Measuring loudness…"), ac.signal);
+          if (state.key !== key) return;
+          state.chainLufs[chainKey(settings)] = lufs;
+          afterEdit(); // saves the analysis with the project
+        } finally {
+          if (state.audioJob === job) state.audioJob = null;
+          $("audProgress").hidden = true;
+          syncAudioUI(); configurePreview();
+        }
+      })();
+      state.audioJob = job;
+    }
+    const job = state.audioJob;
+    if (signal) signal.addEventListener("abort", () => {}, { once: true });
+    await job.promise;
+    if (!audioReady()) return ensureAudio(signal); // settings changed while analysing
+  }
+  return gainsFor(state.audioBase, state.chainLufs[want], state.audioFx);
+}
+
+/* ---------- live preview through an AudioWorklet ---------- */
+let audioCtx = null, previewGraph = null, previewNode = null;
+async function ensurePreviewGraph() {
+  if (previewGraph || audioCtx === false) return previewGraph;
+  try {
+    audioCtx = new AudioContext();
+    await audioCtx.audioWorklet.addModule(new URL("../audio/voice-worklet.js", import.meta.url));
+    const src = audioCtx.createMediaElementSource(video);
+    previewNode = new AudioWorkletNode(audioCtx, "lumen-voice", { numberOfInputs: 1, numberOfOutputs: 1, outputChannelCount: [2] });
+    src.connect(previewNode).connect(audioCtx.destination);
+    previewGraph = true;
+    configurePreview(); syncAudioUI();
+  } catch (e) { console.warn("Live audio preview unavailable", e); audioCtx = false; }
+  return previewGraph;
+}
+function configurePreview() {
+  if (!previewNode) return;
+  const a = state.audioFx, ready = a.on && audioReady();
+  const g = ready ? gainsFor(state.audioBase, state.chainLufs[chainKey(a)], a) : null;
+  previewNode.port.postMessage({ type: "config", on: ready, settings: { ...a }, profile: ready ? state.audioBase.profile : null, pre: g?.pre ?? 0, post: g?.post ?? 0 });
+}
+video.addEventListener("play", () => { if (audioCtx && audioCtx.state === "suspended") audioCtx.resume(); });
+{
+  const cmp = $("audCompare");
+  const hold = (v) => { previewNode?.port.postMessage({ type: "bypass", value: v }); cmp.classList.toggle("held", v); cmp.textContent = v ? "Playing the original" : "Hold to hear the original"; };
+  cmp.addEventListener("pointerdown", (e) => { e.preventDefault(); cmp.setPointerCapture(e.pointerId); hold(true); if (video.paused) play(); });
+  for (const ev of ["pointerup", "pointercancel"]) cmp.addEventListener(ev, () => hold(false));
+  cmp.addEventListener("keydown", (e) => { if ((e.key === " " || e.key === "Enter") && !e.repeat) { e.preventDefault(); hold(true); if (video.paused) play(); } });
+  cmp.addEventListener("keyup", (e) => { if (e.key === " " || e.key === "Enter") hold(false); });
+}
+
+/* =====================================================================
    Keyboard
    ===================================================================== */
 window.addEventListener("keydown", (e) => {
@@ -793,7 +924,7 @@ for (const name of ["res", "fmt"]) {
   const saved = store.get("edit." + name); const el = saved && document.querySelector(`input[name="${name}"][value="${saved}"]`); if (el) el.checked = true;
   for (const r of document.querySelectorAll(`input[name="${name}"]`)) r.addEventListener("change", () => { store.set("edit." + name, r.value); updateExportInfo(); });
 }
-$("exportOpen").onclick = () => { if (!state.file) return; pause(); updateResOptions(); updateExportInfo(); syncCaptionUI(); dlg.showModal(); };
+$("exportOpen").onclick = () => { if (!state.file) return; pause(); updateResOptions(); updateExportInfo(); syncCaptionUI(); syncAudioUI(); dlg.showModal(); };
 $("exportClose").onclick = () => dlg.close();
 dlg.addEventListener("click", (e) => { if (e.target === dlg) dlg.close(); }); // click on backdrop
 
@@ -839,8 +970,14 @@ async function doExport() {
   const t0 = performance.now(), total = ranges.reduce((s, [a, b]) => s + b - a, 0);
   try {
     if (state.captions.on && state.capCues.length) await loadCaptionFonts();
+    let audioFx = null;
+    if (state.audioFx.on && state.atrack) {
+      $("xEta").textContent = "analyzing audio…";
+      const g = await ensureAudio(ac.signal);
+      audioFx = { settings: { ...state.audioFx }, profile: state.audioBase.profile, pre: g.pre, post: g.post };
+    }
     const { blob, codec, audio, audioNote } = await exportEdit({
-      file: state.file, ranges, fmt, ow, oh, quality: QUALITY.high, sharp: upscale ? 0.5 : 0, colorFix: state.colorFix, signal: ac.signal, overlay: captionOverlay(),
+      file: state.file, ranges, fmt, ow, oh, quality: QUALITY.high, sharp: upscale ? 0.5 : 0, colorFix: state.colorFix, signal: ac.signal, overlay: captionOverlay(), audioFx,
       onProgress: (p, { frames }) => {
         const el = (performance.now() - t0) / 1000;
         $("xFill").style.width = (p * 100).toFixed(1) + "%"; $("xPct").textContent = Math.floor(p * 100) + "%";
@@ -878,7 +1015,7 @@ function setExporting(b) {
   $("exportOpen").classList.toggle("exporting", b);
   for (const el of document.querySelectorAll('input[name="fmt"]')) el.disabled = b;
   if (b) { $("xFill").style.width = "0"; $("xPct").textContent = "0%"; $("xFps").textContent = "0"; $("xEta").textContent = "starting…"; }
-  updateResOptions(); setToolsEnabled();
+  updateResOptions(); setToolsEnabled(); syncAudioUI(); syncCaptionUI();
 }
 
 $("saveBtn").onclick = async () => { if (!state.out) return; try { await saveBlob(state.out.blob, state.out.name); } catch (e) { show("xErr", e.message); } };
