@@ -1,6 +1,6 @@
 # Lumen
 
-**Live:** https://foundersmax.github.io/lumen-upscaler/
+**Live:** https://wetnix.com (editor: https://wetnix.com/edit/)
 
 Private, in-browser video tools. Everything runs on the user's device (WebCodecs, WebGL2, WebGPU/WASM); files never leave it.
 
