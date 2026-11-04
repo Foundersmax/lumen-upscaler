@@ -653,6 +653,8 @@ function buildCaptionUI() {
   for (const [name, key] of [["capPos", "pos"], ["capSize", "size"], ["capLen", "length"]])
     for (const r of document.querySelectorAll(`input[name="${name}"]`)) r.addEventListener("change", () => setCaption({ [key]: r.value }));
   $("capOn").addEventListener("change", () => setCaption({ on: $("capOn").checked }));
+  $("capLead").addEventListener("input", () => { paintLead(); setCaption({ lead: +$("capLead").value }); });
+  setupCaptionDrag();
   $("xCap").addEventListener("change", () => setCaption({ on: $("xCap").checked }));
 }
 function drawStyleTiles() {
@@ -667,16 +669,18 @@ function syncCaptionUI() {
   const c = state.captions;
   $("capOn").checked = c.on; $("xCap").checked = c.on; $("capBody").hidden = !c.on;
   const set = (name, v) => { const el = document.querySelector(`input[name="${name}"][value="${v}"]`); if (el) el.checked = true; };
-  set("capStyle", c.style); set("capPos", c.pos); set("capSize", c.size); set("capLen", c.length); set("capColor", c.color);
+  set("capStyle", c.style); set("capSize", c.size); set("capLen", c.length); set("capColor", c.color);
+  for (const r of document.querySelectorAll('input[name="capPos"]')) r.checked = r.value === c.pos; // none checked when dragged ("custom")
+  const lead = $("capLead"); lead.value = c.lead ?? 0.15; paintLead();
   $("xCapStyle").textContent = `· ${CAPTION_STYLES[c.style]?.name || ""}`;
   $("capSub").textContent = !state.doc ? "Transcribe the video to add animated captions." : c.on ? `${CAPTION_STYLES[c.style].name} style, ${state.capCues.length} caption${state.capCues.length === 1 ? "" : "s"}.` : "Animated word by word and burned into the export.";
   const enabled = !!state.doc?.n;
   $("capOn").disabled = !enabled || !!state.exporting; $("xCap").disabled = !enabled;
 }
-function setCaption(patch) {
+function setCaption(patch, force = false) {
   const before = JSON.stringify(state.captions);
   Object.assign(state.captions, patch);
-  if (JSON.stringify(state.captions) === before) return;
+  if (!force && JSON.stringify(state.captions) === before) return;
   store.set("captions", JSON.stringify({ ...state.captions, on: undefined }));
   if ("color" in patch) drawStyleTiles();
   afterEdit();
@@ -689,7 +693,67 @@ function drawCapOverlay() {
   if (w !== capW || h !== capH) { cv.width = capW = w; cv.height = capH = h; }
   const g = cv.getContext("2d");
   g.clearRect(0, 0, w, h);
-  if (state.captions.on && state.capCues.length && state.file) drawCaptions(g, w, h, video.currentTime || 0, state.capCues, state.captions);
+  capBox = state.captions.on && state.capCues.length && state.file ? drawCaptions(g, w, h, video.currentTime || 0, state.capCues, state.captions) : null;
+  placeHandle();
+}
+function paintLead() {
+  const el = $("capLead"), v = +el.value;
+  el.style.setProperty("--p", ((v - el.min) / (el.max - el.min)) * 100 + "%");
+  $("capLeadVal").textContent = Math.abs(v) < 0.001 ? "as transcribed" : `${Math.abs(v).toFixed(2)} s ${v > 0 ? "earlier" : "later"}`;
+}
+
+/* ---------- drag the caption to position it ---------- */
+let capBox = null, capDrag = null;
+function placeHandle() {
+  const hd = $("capHandle"), cv = $("capCanvas");
+  if (!capBox) { if (!capDrag) hd.hidden = true; return; }
+  const k = cv.clientWidth / cv.width;
+  hd.hidden = false;
+  Object.assign(hd.style, { left: capBox.x * k + "px", top: capBox.y * k + "px", width: capBox.w * k + "px", height: capBox.h * k + "px" });
+  hd.setAttribute("aria-valuetext", `${Math.round(state.captions.pos === "custom" ? state.captions.x * 100 : 50)}% across, ${state.captions.pos === "custom" ? Math.round(state.captions.y * 100) + "% down" : state.captions.pos}`);
+}
+function currentCenter() {
+  const cv = $("capCanvas");
+  if (state.captions.pos === "custom") return [state.captions.x, state.captions.y];
+  return capBox ? [(capBox.x + capBox.w / 2) / cv.width, (capBox.y + capBox.h / 2) / cv.height] : [0.5, 0.82];
+}
+function moveCaption(x, y, live) {
+  const snap = Math.abs(x - 0.5) < 0.025;
+  if (snap) x = 0.5;
+  $("capGuide").hidden = !(live && snap);
+  x = Math.min(1, Math.max(0, x)); y = Math.min(1, Math.max(0, y));
+  if (live) { Object.assign(state.captions, { pos: "custom", x, y }); drawCapOverlay(); for (const r of document.querySelectorAll('input[name="capPos"]')) r.checked = false; }
+  else setCaption({ pos: "custom", x, y }, true);
+}
+function setupCaptionDrag() {
+  const hd = $("capHandle"), player = $("player");
+  hd.addEventListener("pointerdown", (e) => {
+    if (e.button !== 0 || state.exporting) return;
+    e.preventDefault(); hd.setPointerCapture(e.pointerId);
+    const r = player.getBoundingClientRect(), [cx, cy] = currentCenter();
+    capDrag = { dx: (e.clientX - r.left) / r.width - cx, dy: (e.clientY - r.top) / r.height - cy, moved: false };
+    hd.classList.add("dragging");
+  });
+  hd.addEventListener("pointermove", (e) => {
+    if (!capDrag) return;
+    const r = player.getBoundingClientRect();
+    capDrag.moved = true;
+    moveCaption((e.clientX - r.left) / r.width - capDrag.dx, (e.clientY - r.top) / r.height - capDrag.dy, true);
+  });
+  const end = () => {
+    if (!capDrag) return;
+    const moved = capDrag.moved; capDrag = null;
+    hd.classList.remove("dragging"); $("capGuide").hidden = true;
+    if (moved) moveCaption(state.captions.x, state.captions.y, false); // save
+  };
+  hd.addEventListener("pointerup", end); hd.addEventListener("pointercancel", end);
+  hd.addEventListener("keydown", (e) => {
+    const step = e.shiftKey ? 0.05 : 0.01, [x, y] = currentCenter();
+    const d = { ArrowLeft: [-step, 0], ArrowRight: [step, 0], ArrowUp: [0, -step], ArrowDown: [0, step] }[e.key];
+    if (!d) return;
+    e.preventDefault(); e.stopPropagation();
+    moveCaption(x + d[0], y + d[1], false);
+  });
 }
 new ResizeObserver(() => drawCapOverlay()).observe($("capCanvas"));
 /** For the exporter: maps cues through the final ranges and returns the per-frame draw function. */

@@ -13,7 +13,9 @@ export const CAPTION_COLORS = ["#FFD43B", "#4ADE80", "#60A5FA", "#F472B6", "#FB9
 const SIZE = { s: 0.048, m: 0.064, l: 0.085 };           // font size as a fraction of the short side
 const LENGTH = { short: 3, medium: 6, long: 10 };        // max words per caption
 
-export const DEFAULT_CAPTIONS = { on: false, style: "highlight", pos: "bottom", size: "m", color: "#FFD43B", length: "medium" };
+/** lead: seconds captions run ahead of the transcript timestamps (speech-model word times land
+ *  slightly after the sound). pos "custom" uses x/y: caption centre as fractions of the frame. */
+export const DEFAULT_CAPTIONS = { on: false, style: "highlight", pos: "bottom", size: "m", color: "#FFD43B", length: "medium", lead: 0.15, x: 0.5, y: 0.82 };
 
 /**
  * Groups kept (non-cut) words into caption cues, in source time. Gaps and lengths are measured
@@ -101,24 +103,33 @@ const ease = (x) => 1 - Math.pow(1 - Math.min(1, Math.max(0, x)), 3);
 const darkInk = (hex) => { const n = parseInt(hex.slice(1), 16); const r = n >> 16, g = (n >> 8) & 255, b = n & 255; return 0.299 * r + 0.587 * g + 0.114 * b > 150; };
 
 /**
- * Draws captions for time t onto ctx (W×H pixels). Returns true if anything was drawn.
+ * Draws captions for time t onto ctx (W×H pixels). Returns the drawn box {x,y,w,h}, or null.
  * @param {CanvasRenderingContext2D|OffscreenCanvasRenderingContext2D} ctx
  */
 export function drawCaptions(ctx, W, H, t, cues, opts) {
-  const ci = cueAt(cues, t); if (ci < 0) return false;
+  t += opts.lead ?? DEFAULT_CAPTIONS.lead;
+  const ci = cueAt(cues, t); if (ci < 0) return null;
   const st = CAPTION_STYLES[opts.style] || CAPTION_STYLES.highlight;
   const cue = cues[ci];
   // the word being spoken: last word that has started (stays lit through short gaps)
   let cur = -1;
   for (let i = 0; i < cue.words.length; i++) if (cue.words[i].s <= t) cur = i;
-  if (st.single && cur < 0) return false;
+  if (st.single && cur < 0) return null;
   const L = layout(ctx, cue, W, H, opts, st);
   const { fs, lh, space, widths, texts } = L;
   const lines = st.single ? [{ idx: [Math.max(0, cur)], w: widths[Math.max(0, cur)] }] : L.lines;
   const blockH = lines.length * lh;
   const margin = H * 0.085;
-  const top = opts.pos === "top" ? margin : opts.pos === "middle" ? (H - blockH) / 2 : H - margin - blockH;
-  const enter = ease((t - cue.s) / 0.14);
+  const blockW = Math.max(...lines.map((l) => l.w)) + (st.box ? fs * 0.9 : fs * 0.3);
+  let top, cx;
+  if (opts.pos === "custom") {
+    cx = Math.min(Math.max(opts.x * W, blockW / 2 + W * 0.02), W - blockW / 2 - W * 0.02); // keep on screen
+    top = Math.min(Math.max(opts.y * H - blockH / 2, H * 0.02), H - blockH - H * 0.02);
+  } else {
+    cx = W / 2;
+    top = opts.pos === "top" ? margin : opts.pos === "middle" ? (H - blockH) / 2 : H - margin - blockH;
+  }
+  const enter = ease((t - cue.s) / 0.1);
 
   ctx.save();
   ctx.font = `${st.weight} ${fs}px ${st.font}`;
@@ -129,11 +140,11 @@ export function drawCaptions(ctx, W, H, t, cues, opts) {
   if (st.box) {
     const bw = Math.max(...lines.map((l) => l.w)) + fs * 0.9, bh = blockH + fs * 0.42;
     ctx.fillStyle = "rgba(0,0,0,0.62)";
-    rr(ctx, (W - bw) / 2, top - fs * 0.21 + dy, bw, bh, fs * 0.28); ctx.fill();
+    rr(ctx, cx - bw / 2, top - fs * 0.21 + dy, bw, bh, fs * 0.28); ctx.fill();
   }
 
   lines.forEach((line, li) => {
-    let x = (W - line.w) / 2;
+    let x = cx - line.w / 2;
     const y = top + li * lh + lh / 2 + dy;
     line.idx.forEach((i, k) => {
       const w = widths[i], word = cue.words[i];
@@ -158,7 +169,7 @@ export function drawCaptions(ctx, W, H, t, cues, opts) {
     });
   });
   ctx.restore();
-  return true;
+  return { x: cx - blockW / 2, y: top - fs * 0.25, w: blockW, h: blockH + fs * 0.5 }; // drawn area, for dragging
 }
 
 /** Makes sure caption fonts are loaded before drawing to a canvas (canvas won't wait for them). */

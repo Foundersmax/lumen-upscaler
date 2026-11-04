@@ -381,3 +381,8 @@ dialog.sheet::backdrop { background: rgb(8 10 14 / .5); backdrop-filter: blur(3p
 .check { display: flex; align-items: center; gap: 10px; font-size: 14px; cursor: pointer; }
 .check input { width: 16px; height: 16px; accent-color: var(--accent); margin: 0; }
 .check .muted { color: var(--muted); }
+.caphandle { position: absolute; border-radius: 8px; cursor: grab; touch-action: none; outline: 1.5px dashed transparent; outline-offset: 2px; transition: outline-color .12s; }
+.player:hover .caphandle, .caphandle:focus-visible, .caphandle.dragging { outline-color: rgb(255 255 255 / .75); }
+.caphandle.dragging { cursor: grabbing; }
+.capguide { position: absolute; top: 0; bottom: 0; left: 50%; width: 0; border-left: 1.5px dashed rgb(255 255 255 / .7); pointer-events: none; }
+.cap-sync { grid-column: 1 / -1; }
