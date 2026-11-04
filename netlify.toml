@@ -1,4 +1,4 @@
 [build]
-  command = "node build.mjs"
+  command = "node scripts/vendor.mjs && node build.mjs"
   publish = "dist"
 # Headers come from public/_headers (copied into dist/).

@@ -1,0 +1,10 @@
+{
+  "name": "lumen",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "vendor": "node scripts/vendor.mjs",
+    "build": "node scripts/vendor.mjs && node build.mjs",
+    "dev": "node scripts/vendor.mjs && python3 -m http.server 8000"
+  }
+}

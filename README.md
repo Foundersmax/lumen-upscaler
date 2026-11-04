@@ -1,27 +1,34 @@
-# Lumen Upscaler
+# Lumen
 
 **Live:** https://foundersmax.github.io/lumen-upscaler/
 
-Upscale videos to 1080p, 2K or 4K in the browser. Everything runs locally on the GPU (WebGL2 + WebCodecs); files never leave the device.
+Private, in-browser video tools. Everything runs on the user's device (WebCodecs, WebGL2, WebGPU/WASM); files never leave it.
+
+- **Edit** (`/edit/`): edit video by editing its transcript. On-device Whisper transcription with word timestamps, select words and press Delete to cut, one-click pause trimming and filler removal, undo/redo, playback that skips cuts, waveform timeline, export to MP4/WebM (optionally upscaled), captions (.srt) and transcript (.txt). Projects are saved in the browser and restored when the same file is reopened.
+- **Upscale** (`/`): upscale video to 1080p, 2K or 4K with a GPU pipeline (Catmull-Rom with anti-ringing + contrast-adaptive sharpening) and a before/after preview.
 
 ## Develop
-`index.html` is the single source file. Open it through any local server:
+No bundler or dependencies to install. Fetch the pinned third-party builds once, then serve the repo root:
 
-    python3 -m http.server 8000
+    node scripts/vendor.mjs         # downloads + verifies mediabunny, transformers.js, onnxruntime-web into vendor/
+    python3 -m http.server 8000     # → http://localhost:8000/ and /edit/
 
-## Build
-    node build.mjs        # → dist/ (no dependencies needed)
+## Layout
+    index.html, edit/index.html   pages
+    src/engine/                   shared: GPU upscaler, chunked output sink, codecs/helpers
+    src/upscale/main.js           Upscale page
+    src/edit/                     Edit page: transcript model, audio extraction, Whisper worker, export, storage
+    src/styles/app.css            design tokens + components (light and dark)
+    scripts/vendor.mjs            fetches pinned third-party builds (sha512-verified) into vendor/ (generated, not committed)
 
-The build wraps the page in a full document, self-hosts mediabunny from `vendor/`, and splits CSS/JS into hashed files so the strict Content-Security-Policy in `public/_headers` / `vercel.json` works.
+## Build and deploy
+    node scripts/vendor.mjs && node build.mjs   # → dist/ (copies files, stamps ?v=<hash> on module URLs for cache busting)
 
-## Deploy
-Any static host with HTTPS (required for WebCodecs):
-- **GitHub Pages:** push to `main`; `.github/workflows/pages.yml` builds and deploys. In the repo settings set Pages → Source to "GitHub Actions".
-- **Netlify:** connect the repo; `netlify.toml` is preconfigured. Or drag `dist/` onto app.netlify.com/drop.
-- **Vercel:** import the repo; `vercel.json` is preconfigured.
-- **Cloudflare Pages:** build command `node build.mjs`, output `dist`.
+Pushing to `main` deploys to GitHub Pages via `.github/workflows/pages.yml`. `netlify.toml`, `vercel.json` and `public/_headers` (strict CSP) are ready for other hosts. HTTPS is required.
+
+Speech models download from Hugging Face on first use and are cached by the browser.
 
 ## Browser support
 Chrome, Edge and other Chromium browsers are fully supported. Safari and Firefox depend on their WebCodecs support; the app shows a message when something is missing.
 
-Video I/O by [mediabunny](https://github.com/Vanilagy/mediabunny) (MPL-2.0, see `vendor/`).
+Third-party licenses are copied into `vendor/` by the vendor script.
