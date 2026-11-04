@@ -1,0 +1,4 @@
+[build]
+  command = "node build.mjs"
+  publish = "dist"
+# Headers come from public/_headers (copied into dist/).
