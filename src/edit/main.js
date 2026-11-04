@@ -1,6 +1,7 @@
 // Edit page: transcript-based video editing.
 import { Input, ALL_FORMATS, BlobSource } from "../../vendor/mediabunny.min.mjs";
 import { Doc, sanitizeWords, normWord, mapTime, cutAt, captionCues, toSRT, toText } from "./transcript.js";
+import { CAPTION_STYLES, CAPTION_COLORS, DEFAULT_CAPTIONS, buildCues, mapCues, rangeMapper, drawCaptions, loadCaptionFonts } from "./captions.js";
 import { extractAudio16k, peaks as computePeaks, ASR_RATE } from "./audio.js";
 import { exportEdit, ExportCancelled } from "./export.js";
 import { getProject, putProject, projectKey } from "./store.js";
@@ -15,6 +16,7 @@ const state = {
   doc: null, cuts: [], kept: [], peaks: null, audio: null, undo: [], redo: [],
   wordEls: [], gapEls: new Map(), nowIdx: -1, followUntil: 0,
   find: { hits: [], len: 0, cur: -1 },
+  captions: loadCaptionPrefs(), capCues: [],
   transcribing: null, exporting: null, out: null, loadId: 0,
 };
 const busy = () => !!(state.transcribing || state.exporting);
@@ -108,7 +110,7 @@ async function loadFile(file) {
       file, key: projectKey(file), input, atrack: audioOk ? at : null, duration,
       srcW: vt.displayWidth, srcH: vt.displayHeight,
       colorFix: !cs?.matrix && Math.min(vt.codedWidth, vt.codedHeight) < 720,
-      doc: null, cuts: [], kept: [[0, duration]], peaks: null, audio: null, undo: [], redo: [], nowIdx: -1,
+      doc: null, cuts: [], kept: [[0, duration]], peaks: null, audio: null, undo: [], redo: [], nowIdx: -1, captions: loadCaptionPrefs(), capCues: [],
       url: URL.createObjectURL(file),
     });
     $("player").style.aspectRatio = `${state.srcW} / ${state.srcH}`;
@@ -125,6 +127,7 @@ async function loadFile(file) {
     if (saved?.doc?.words?.length && Math.abs(saved.doc.duration - duration) < 0.5) {
       state.doc = Doc.fromJSON(saved.doc);
       state.peaks = saved.peaks || null;
+      if (saved.captions) { state.captions = { ...DEFAULT_CAPTIONS, ...saved.captions }; syncCaptionUI(); }
       $("setup").hidden = true;
       renderScript(); afterEdit(false);
       show("note", "Restored your transcript and edits for this file.");
@@ -325,11 +328,12 @@ function afterEdit(persist = true) {
   const doc = state.doc;
   state.cuts = doc ? doc.cutIntervals() : [];
   state.kept = doc ? doc.keptRanges(state.cuts) : (state.duration ? [[0, state.duration]] : []);
-  updateClasses(); drawStrip(); updateStats(); updateExportInfo(); updateClock(); updateResume(); setToolsEnabled();
+  state.capCues = doc ? buildCues(doc, state.captions, (t) => mapTime(t, state.cuts)) : [];
+  updateClasses(); drawStrip(); updateStats(); updateExportInfo(); updateClock(); updateResume(); setToolsEnabled(); drawCapOverlay(); syncCaptionUI();
   if (persist && doc && state.key) {
     clearTimeout(persistTimer);
     $("saved").textContent = "Saving…";
-    const key = state.key, snapshot = { doc: doc.toJSON(), peaks: state.peaks };
+    const key = state.key, snapshot = { doc: doc.toJSON(), peaks: state.peaks, captions: state.captions };
     persistTimer = setTimeout(async () => {
       const ok = await putProject(key, snapshot);
       $("saved").textContent = ok === null ? "Not saved in this browser" : "Saved";
@@ -537,11 +541,11 @@ function play() {
   video.play().catch(() => {});
 }
 function pause() { video.pause(); }
-function seek(t) { if (!state.file) return; video.currentTime = Math.max(0, Math.min(state.duration, t)); updateClock(); highlightNow(); drawStrip(); }
+function seek(t) { if (!state.file) return; video.currentTime = Math.max(0, Math.min(state.duration, t)); updateClock(); highlightNow(); drawStrip(); drawCapOverlay(); }
 $("playBtn").onclick = () => (video.paused ? play() : pause());
 video.addEventListener("play", () => { $("playIcon").innerHTML = PAUSE; $("playBtn").setAttribute("aria-label", "Pause"); loop(); });
 video.addEventListener("pause", () => { $("playIcon").innerHTML = PLAY; $("playBtn").setAttribute("aria-label", "Play"); });
-video.addEventListener("seeked", () => { updateClock(); highlightNow(); drawStrip(); });
+video.addEventListener("seeked", () => { updateClock(); highlightNow(); drawStrip(); drawCapOverlay(); });
 
 function loop() {
   if (video.paused) return;
@@ -550,7 +554,7 @@ function loop() {
     if (c[1] >= state.duration - 0.05) { video.pause(); video.currentTime = Math.max(0, c[0] - 0.01); }
     else video.currentTime = c[1];
   }
-  updateClock(); highlightNow(); drawStrip();
+  updateClock(); highlightNow(); drawStrip(); drawCapOverlay();
   requestAnimationFrame(loop);
 }
 
@@ -622,18 +626,99 @@ strip.addEventListener("pointerup", () => { scrubbing = false; });
 strip.addEventListener("pointercancel", () => { scrubbing = false; });
 
 /* =====================================================================
+   Captions
+   ===================================================================== */
+function loadCaptionPrefs() {
+  try { return { ...DEFAULT_CAPTIONS, ...JSON.parse(store.get("captions", "{}")), on: false }; } catch { return { ...DEFAULT_CAPTIONS }; }
+}
+const SAMPLE = { s: 0, e: 2, words: [{ t: "Cut", s: 0, e: 0.3 }, { t: "the", s: 0.3, e: 0.5 }, { t: "boring", s: 0.5, e: 1.1 }, { t: "parts", s: 1.1, e: 2 }] };
+function buildCaptionUI() {
+  const wrap = $("capStyles");
+  for (const [id, st] of Object.entries(CAPTION_STYLES)) {
+    const input = document.createElement("input"); input.type = "radio"; input.name = "capStyle"; input.id = "cs-" + id; input.value = id;
+    const label = document.createElement("label"); label.htmlFor = input.id;
+    const c = document.createElement("canvas"); c.width = 320; c.height = 180; c.dataset.style = id;
+    const name = document.createElement("span"); name.className = "cs-name"; name.textContent = st.name;
+    label.append(c, name); wrap.append(input, label);
+    input.addEventListener("change", () => setCaption({ style: id }));
+  }
+  const sw = $("capColors");
+  CAPTION_COLORS.forEach((hex, i) => {
+    const input = document.createElement("input"); input.type = "radio"; input.name = "capColor"; input.id = "cc" + i; input.value = hex;
+    const label = document.createElement("label"); label.htmlFor = input.id; label.style.background = hex; label.title = hex;
+    const sr = document.createElement("span"); sr.className = "sr"; sr.textContent = `Colour ${hex}`; label.append(sr);
+    sw.append(input, label);
+    input.addEventListener("change", () => setCaption({ color: hex }));
+  });
+  for (const [name, key] of [["capPos", "pos"], ["capSize", "size"], ["capLen", "length"]])
+    for (const r of document.querySelectorAll(`input[name="${name}"]`)) r.addEventListener("change", () => setCaption({ [key]: r.value }));
+  $("capOn").addEventListener("change", () => setCaption({ on: $("capOn").checked }));
+  $("xCap").addEventListener("change", () => setCaption({ on: $("xCap").checked }));
+}
+function drawStyleTiles() {
+  for (const c of $("capStyles").querySelectorAll("canvas")) {
+    const g = c.getContext("2d"), grd = g.createLinearGradient(0, 0, 0, c.height);
+    grd.addColorStop(0, "#3a4458"); grd.addColorStop(1, "#151820");
+    g.fillStyle = grd; g.fillRect(0, 0, c.width, c.height);
+    drawCaptions(g, c.width, c.height, 0.6, [SAMPLE], { ...state.captions, style: c.dataset.style, pos: "middle", size: "l", length: "long", scale: 1.7 });
+  }
+}
+function syncCaptionUI() {
+  const c = state.captions;
+  $("capOn").checked = c.on; $("xCap").checked = c.on; $("capBody").hidden = !c.on;
+  const set = (name, v) => { const el = document.querySelector(`input[name="${name}"][value="${v}"]`); if (el) el.checked = true; };
+  set("capStyle", c.style); set("capPos", c.pos); set("capSize", c.size); set("capLen", c.length); set("capColor", c.color);
+  $("xCapStyle").textContent = `· ${CAPTION_STYLES[c.style]?.name || ""}`;
+  $("capSub").textContent = !state.doc ? "Transcribe the video to add animated captions." : c.on ? `${CAPTION_STYLES[c.style].name} style, ${state.capCues.length} caption${state.capCues.length === 1 ? "" : "s"}.` : "Animated word by word and burned into the export.";
+  const enabled = !!state.doc?.n;
+  $("capOn").disabled = !enabled || !!state.exporting; $("xCap").disabled = !enabled;
+}
+function setCaption(patch) {
+  const before = JSON.stringify(state.captions);
+  Object.assign(state.captions, patch);
+  if (JSON.stringify(state.captions) === before) return;
+  store.set("captions", JSON.stringify({ ...state.captions, on: undefined }));
+  if ("color" in patch) drawStyleTiles();
+  afterEdit();
+}
+let capW = 0, capH = 0;
+function drawCapOverlay() {
+  const cv = $("capCanvas"), dpr = devicePixelRatio || 1;
+  const w = Math.round(cv.clientWidth * dpr), h = Math.round(cv.clientHeight * dpr);
+  if (!w || !h) return;
+  if (w !== capW || h !== capH) { cv.width = capW = w; cv.height = capH = h; }
+  const g = cv.getContext("2d");
+  g.clearRect(0, 0, w, h);
+  if (state.captions.on && state.capCues.length && state.file) drawCaptions(g, w, h, video.currentTime || 0, state.capCues, state.captions);
+}
+new ResizeObserver(() => drawCapOverlay()).observe($("capCanvas"));
+/** For the exporter: maps cues through the final ranges and returns the per-frame draw function. */
+function captionOverlay() {
+  if (!state.captions.on || !state.capCues.length) return null;
+  const opts = { ...state.captions }, cues = state.capCues;
+  return (ranges) => {
+    const timed = mapCues(cues, rangeMapper(ranges));
+    return (ctx, t, w, h) => drawCaptions(ctx, w, h, t, timed, opts);
+  };
+}
+
+/* =====================================================================
    Keyboard
    ===================================================================== */
 window.addEventListener("keydown", (e) => {
   if (editing) return;
-  const tag = e.target.tagName, typing = /^(INPUT|SELECT|TEXTAREA)$/.test(tag) || e.target.isContentEditable;
+  const tag = e.target.tagName;
+  // text entry blocks editing shortcuts; checkboxes, radios and buttons don't
+  const typing = e.target.isContentEditable || tag === "TEXTAREA" || tag === "SELECT" ||
+    (tag === "INPUT" && !/^(checkbox|radio|range|button|submit|file|color)$/.test(e.target.type));
+  const control = /^(INPUT|SELECT|TEXTAREA|BUTTON)$/.test(tag); // Space activates these natively
   const mod = e.ctrlKey || e.metaKey, k = e.key.toLowerCase();
   if (dlg.open) return;
   if (mod && k === "f" && state.doc) { e.preventDefault(); openFind(); return; }
   if (mod && k === "z" && !typing) { e.preventDefault(); e.shiftKey ? redo() : undo(); return; }
   if (mod && k === "y" && !typing) { e.preventDefault(); redo(); return; }
   if ((e.key === "Delete" || e.key === "Backspace") && !typing) { if (applySelection("toggle")) e.preventDefault(); return; }
-  if (e.key === " " && !typing && tag !== "BUTTON" && state.file) { e.preventDefault(); video.paused ? play() : pause(); return; }
+  if (e.key === " " && !typing && !control && state.file) { e.preventDefault(); video.paused ? play() : pause(); return; }
   if (e.key === "Escape") { getSelection().removeAllRanges(); $("seltool").hidden = true; }
 });
 
@@ -644,7 +729,7 @@ for (const name of ["res", "fmt"]) {
   const saved = store.get("edit." + name); const el = saved && document.querySelector(`input[name="${name}"][value="${saved}"]`); if (el) el.checked = true;
   for (const r of document.querySelectorAll(`input[name="${name}"]`)) r.addEventListener("change", () => { store.set("edit." + name, r.value); updateExportInfo(); });
 }
-$("exportOpen").onclick = () => { if (!state.file) return; pause(); updateResOptions(); updateExportInfo(); dlg.showModal(); };
+$("exportOpen").onclick = () => { if (!state.file) return; pause(); updateResOptions(); updateExportInfo(); syncCaptionUI(); dlg.showModal(); };
 $("exportClose").onclick = () => dlg.close();
 dlg.addEventListener("click", (e) => { if (e.target === dlg) dlg.close(); }); // click on backdrop
 
@@ -689,8 +774,9 @@ async function doExport() {
   const wake = await navigator.wakeLock?.request("screen").catch(() => null);
   const t0 = performance.now(), total = ranges.reduce((s, [a, b]) => s + b - a, 0);
   try {
+    if (state.captions.on && state.capCues.length) await loadCaptionFonts();
     const { blob, codec, audio, audioNote } = await exportEdit({
-      file: state.file, ranges, fmt, ow, oh, quality: QUALITY.high, sharp: upscale ? 0.5 : 0, colorFix: state.colorFix, signal: ac.signal,
+      file: state.file, ranges, fmt, ow, oh, quality: QUALITY.high, sharp: upscale ? 0.5 : 0, colorFix: state.colorFix, signal: ac.signal, overlay: captionOverlay(),
       onProgress: (p, { frames }) => {
         const el = (performance.now() - t0) / 1000;
         $("xFill").style.width = (p * 100).toFixed(1) + "%"; $("xPct").textContent = Math.floor(p * 100) + "%";
@@ -741,5 +827,9 @@ window.addEventListener("beforeunload", (e) => { if (busy()) { e.preventDefault(
 /* =====================================================================
    Boot
    ===================================================================== */
-if (checkSupport()) { renderExample(); drawStrip(); setToolsEnabled(); }
+if (checkSupport()) {
+  renderExample(); drawStrip(); setToolsEnabled();
+  buildCaptionUI(); syncCaptionUI(); drawStyleTiles();
+  loadCaptionFonts().then(() => { drawStyleTiles(); drawCapOverlay(); });
+}
 window.__edit = { state, loadFile, transcribe, doExport, undo, redo, applySelection, edit, runFind };

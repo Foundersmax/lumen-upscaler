@@ -36,6 +36,8 @@ export class ExportCancelled extends Error { constructor() { super("Export cance
  * @param {boolean} o.colorFix apply BT.601 fix for untagged SD sources
  * @param {(p:number, info:{frames:number})=>void} o.onProgress
  * @param {AbortSignal} o.signal
+ * @param {(ranges:[number,number][]) => ((ctx, t:number, w:number, h:number) => void) | null} [o.overlay]
+ *   called with the final (frame-snapped) ranges; returns a function that draws on each output frame
  * @returns {Promise<{blob: Blob, codec: string, audio: string|null, audioNote: string}>}
  */
 export async function exportEdit(o) {
@@ -93,6 +95,9 @@ async function attempt(o, { codec, hw }) {
     const ranges = fps >= 10 && fps <= 121 ? snapRanges(o.ranges, fps) : o.ranges;
     if (!ranges.length) throw Object.assign(new Error("Nothing to export: every part of the video is cut."), { fatal: true });
     const total = ranges.reduce((s, [a, b]) => s + (b - a), 0);
+    const drawOverlay = o.overlay?.(ranges) || null;
+    const comp = drawOverlay ? new OffscreenCanvas(o.ow, o.oh) : null;
+    const compCtx = comp?.getContext("2d", { alpha: false });
     let frames = 0, videoDone = 0;
     const check = () => { if (o.signal.aborted) throw new ExportCancelled(); };
 
@@ -115,7 +120,9 @@ async function attempt(o, { codec, hw }) {
               s.drawWithFit(ctx, { fit: "fill" }); src = rot; sw = dw; sh = dh;
             }
             gpu.render(src, sw, sh, o.ow, o.oh, o.sharp);
-            const out = new VideoSample(gpu.canvas, { timestamp: ts, duration: end - start });
+            let frame = gpu.canvas;
+            if (drawOverlay) { compCtx.drawImage(gpu.canvas, 0, 0); drawOverlay(compCtx, ts, o.ow, o.oh); frame = comp; }
+            const out = new VideoSample(frame, { timestamp: ts, duration: end - start });
             await vsrc.add(out); out.close();
             last = ts; frames++;
             videoDone = offset + (end - a);

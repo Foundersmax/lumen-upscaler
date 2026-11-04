@@ -4,7 +4,7 @@
 
 Private, in-browser video tools. Everything runs on the user's device (WebCodecs, WebGL2, WebGPU/WASM); files never leave it.
 
-- **Edit** (`/edit/`): edit video by editing its transcript. On-device Whisper transcription with word timestamps, select words and press Delete to cut, one-click pause trimming and filler removal, undo/redo, playback that skips cuts, waveform timeline, export to MP4/WebM (optionally upscaled), captions (.srt) and transcript (.txt). Transcription can be paused and continued later; double-click a word to fix its text; find in transcript with "cut all". Projects are saved in the browser and restored when the same file is reopened.
+- **Edit** (`/edit/`): edit video by editing its transcript. On-device Whisper transcription with word timestamps, select words and press Delete to cut, one-click pause trimming and filler removal, undo/redo, playback that skips cuts, waveform timeline, export to MP4/WebM (optionally upscaled), captions (.srt) and transcript (.txt). Animated burned-in captions (6 styles: Highlight, Pop, Box, Clean, Reveal, One word; position, size, length, highlight colour) previewed live over the video. Transcription can be paused and continued later; double-click a word to fix its text; find in transcript with "cut all". Projects are saved in the browser and restored when the same file is reopened.
 - **Upscale** (`/upscale/`): upscale video to 1080p, 2K or 4K with a GPU pipeline (Catmull-Rom with anti-ringing + contrast-adaptive sharpening) and a before/after preview.
 
 ## Develop
