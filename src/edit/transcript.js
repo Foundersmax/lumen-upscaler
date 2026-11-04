@@ -11,12 +11,16 @@ export const PAD = 0.12;
  * Clean raw ASR words: trim text, drop empties, force non-overlapping increasing times within [0, duration].
  * @param {{t:string,s:number,e:number}[]} words
  */
-export function sanitizeWords(words, duration) {
+export function sanitizeWords(words, duration, prevEnd = 0) {
   const out = [];
-  let prevE = 0;
+  let prevE = prevEnd, run = 0;
   for (const w of words) {
     const t = String(w.t ?? "").trim();
     if (!t) continue;
+    // Whisper can loop on one word ("you you you you…"); keep at most 3 in a row.
+    const last = out[out.length - 1];
+    run = last && normWord(last.t) === normWord(t) && normWord(t) ? run + 1 : 0;
+    if (run >= 3) continue;
     let s = Number.isFinite(w.s) ? w.s : prevE;
     let e = Number.isFinite(w.e) ? w.e : s + 0.3;
     s = Math.min(Math.max(s, prevE), duration);
@@ -30,26 +34,40 @@ export function sanitizeWords(words, duration) {
 
 export class Doc {
   /** @param {{t:string,s:number,e:number}[]} words already sanitized */
-  constructor(words, duration) {
+  constructor(words, duration, limit = duration) {
     this.words = words;
     this.duration = duration;
+    /** Transcribed up to here (s). Audio after it is untranscribed and never cut. */
+    this.limit = Math.min(duration, limit);
     this.cutW = new Uint8Array(words.length);      // word i is cut
     this.cutG = new Uint8Array(words.length + 1);  // gap k (before word k; k = n is trailing) is cut explicitly
   }
   get n() { return this.words.length; }
   gapStart(k) { return k === 0 ? 0 : this.words[k - 1].e; }
-  gapEnd(k) { return k === this.n ? this.duration : this.words[k].s; }
+  gapEnd(k) { return k === this.n ? Math.max(this.limit, k ? this.words[k - 1].e : 0) : this.words[k].s; }
+  get complete() { return this.limit >= this.duration - 0.25; }
   gapDur(k) { return this.gapEnd(k) - this.gapStart(k); }
   /** A gap is removed when cut explicitly or when a neighbouring word is cut. */
-  gapCut(k) { return !!(this.cutG[k] || (k > 0 && this.cutW[k - 1]) || (k < this.n && this.cutW[k])); }
+  gapCut(k) {
+    if (k === this.n && !this.complete) return false; // what follows hasn't been transcribed yet
+    return !!(this.cutG[k] || (k > 0 && this.cutW[k - 1]) || (k < this.n && this.cutW[k]));
+  }
 
-  snapshot() { return { w: this.cutW.slice(), g: this.cutG.slice() }; }
-  restore(s) { this.cutW.set(s.w); this.cutG.set(s.g); }
-  toJSON() { return { words: this.words, duration: this.duration, cutW: Array.from(this.cutW), cutG: Array.from(this.cutG) }; }
+  snapshot() { return { w: this.cutW.slice(), g: this.cutG.slice(), t: this.words.map((x) => x.t) }; }
+  restore(s) { this.cutW.set(s.w); this.cutG.set(s.g); if (s.t) s.t.forEach((t, i) => { if (this.words[i]) this.words[i].t = t; }); }
+  toJSON() { return { words: this.words, duration: this.duration, limit: this.limit, cutW: Array.from(this.cutW), cutG: Array.from(this.cutG) }; }
   static fromJSON(o) {
-    const d = new Doc(o.words, o.duration);
+    const d = new Doc(o.words, o.duration, o.limit ?? o.duration);
     if (o.cutW?.length === d.cutW.length) d.cutW.set(o.cutW);
     if (o.cutG?.length === d.cutG.length) d.cutG.set(o.cutG);
+    return d;
+  }
+
+  /** New Doc with more words appended (from continued transcription), keeping existing cuts. */
+  extend(more, limit) {
+    const d = new Doc(this.words.concat(more), this.duration, limit);
+    d.cutW.set(this.cutW);
+    d.cutG.set(this.cutG.subarray(0, this.n)); // the old trailing gap now sits before the new words
     return d;
   }
 
@@ -99,7 +117,10 @@ export class Doc {
   /** Marks pauses ≥ min seconds as cut. Returns how many were newly cut. */
   trimPauses(min) {
     let c = 0;
-    for (let k = 0; k <= this.n; k++) if (this.gapDur(k) >= min && !this.gapCut(k)) { this.cutG[k] = 1; c++; }
+    for (let k = 0; k <= this.n; k++) {
+      if (k === this.n && !this.complete) break;
+      if (this.gapDur(k) >= min && !this.gapCut(k)) { this.cutG[k] = 1; c++; }
+    }
     return c;
   }
   removeFillers() {

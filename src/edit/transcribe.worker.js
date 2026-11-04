@@ -1,8 +1,8 @@
 // Speech-to-text worker: runs Whisper on-device (WebGPU when available, else WebAssembly)
 // and streams word-level timestamps back as each ~30 s window finishes.
 //
-// in:  { type: "run", audio: Float32Array (16 kHz mono), size: "tiny"|"base"|"small", language: string|null }
-// out: { type: "status", text } | { type: "download", loaded, total } | { type: "words", words, progress }
+// in:  { type: "run", audio: Float32Array (16 kHz mono), offset: seconds the audio starts at, size: "tiny"|"base"|"small", language: string|null }
+// out: { type: "status", text } | { type: "download", loaded, total } | { type: "words", words, progress, upTo }
 //      | { type: "done", device, model } | { type: "error", message }
 import { pipeline, env } from "../../vendor/transformers.min.js";
 
@@ -106,7 +106,7 @@ async function transcribeWindow(model, chunk, offset, language) {
 self.onmessage = async ({ data }) => {
   if (data?.type !== "run") return;
   try {
-    const { audio, size, language } = data;
+    const { audio, size, language, offset = 0 } = data;
     let model = await load(size);
     const wins = windows(audio);
     post({ type: "status", text: "Transcribing…" });
@@ -115,15 +115,15 @@ self.onmessage = async ({ data }) => {
       const chunk = audio.subarray(a, b);
       let words = [];
       if (rms(chunk) > 0.003) { // skip near-silent windows; Whisper invents text on silence
-        try { words = await transcribeWindow(model, chunk, a / RATE, language); }
+        try { words = await transcribeWindow(model, chunk, offset + a / RATE, language); }
         catch (e) {
           if (model.device !== "webgpu") throw e;
           console.warn("GPU inference failed, retrying on CPU", e);
           cached = null; model = await loadOn("wasm", size);
-          words = await transcribeWindow(model, chunk, a / RATE, language);
+          words = await transcribeWindow(model, chunk, offset + a / RATE, language);
         }
       }
-      post({ type: "words", words, progress: b / audio.length });
+      post({ type: "words", words, progress: b / audio.length, upTo: offset + b / RATE });
     }
     post({ type: "done", device: model.device, model: model.model });
   } catch (e) {

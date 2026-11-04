@@ -3,15 +3,15 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
-<title>Lumen Upscaler</title>
-<meta name="description" content="Upscale videos to 1080p, 2K or 4K in your browser. GPU-accelerated and private: files never leave your device.">
+<title>Lumen</title>
+<meta name="description" content="Edit video by editing its transcript, and upscale it to 4K. Private video tools that run in your browser: no uploads, no watermark, no account.">
 <meta name="theme-color" content="#0d0f13" media="(prefers-color-scheme: dark)">
 <meta name="theme-color" content="#f3f4f7" media="(prefers-color-scheme: light)">
 <link rel="canonical" href="https://wetnix.com/">
 <meta property="og:url" content="https://wetnix.com/">
 <meta property="og:type" content="website">
-<meta property="og:title" content="Lumen Upscaler">
-<meta property="og:description" content="Upscale videos to 1080p, 2K or 4K in your browser. GPU-accelerated and private: files never leave your device.">
+<meta property="og:title" content="Lumen: edit video by editing words">
+<meta property="og:description" content="Private video tools that run in your browser. No uploads, no watermark, no account.">
 <link rel="icon" href="./favicon.svg" type="image/svg+xml">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
@@ -24,96 +24,102 @@
     <a class="brand" href="./"><span class="mark" aria-hidden="true"></span>Lumen</a>
     <nav class="tabs" aria-label="Tools">
       <a href="./edit/">Edit</a>
-      <a href="./" aria-current="page">Upscale</a>
+      <a href="./upscale/">Upscale</a>
     </nav>
-    <div class="hint" id="hint">Runs on your GPU. <b>Files never leave this device.</b></div>
+    <div class="head-actions"><a class="btn primary small" href="./edit/" style="text-decoration:none">Open editor</a></div>
   </header>
-  <div class="banner" id="support" role="alert" hidden></div>
 
-  <main>
-    <section class="stage" id="stage" aria-label="Preview">
-      <div class="viewport" id="viewport" title="Click to zoom">
-        <div class="frame" id="frame">
-          <canvas id="enhCanvas"></canvas>
-          <canvas id="origCanvas"></canvas>
-          <div class="divider" id="divider"><div class="knob" id="knob" tabindex="0" role="slider" aria-label="Compare split" aria-valuemin="0" aria-valuemax="100" aria-valuenow="50"><svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M6 4 2 8l4 4M10 4l4 4-4 4"/></svg></div></div>
+  <main class="home">
+    <section class="hero">
+      <div>
+        <span class="eyebrow">Runs in your browser</span>
+        <h1>Edit video by editing <s>the timeline</s> words.</h1>
+        <p class="lede">Lumen transcribes your footage <b>on your own device</b>. Delete a sentence and the video follows. Trim the pauses in one click, then export, upscaled to 4K if you like.</p>
+        <div class="ctas">
+          <a class="btn primary" href="./edit/">Open the editor</a>
+          <a class="btn ghost" href="./upscale/">Upscale a video</a>
         </div>
-        <span class="tag l">Original</span><span class="tag r" id="tagR">Upscaled</span>
+        <div class="fine">Free. No uploads, no account, no watermark.</div>
       </div>
-      <div class="bar">
-        <button class="btn ghost small" id="openBtn" type="button">Open video</button>
-        <div class="scrub" id="scrubWrap" hidden>
-          <input type="range" id="scrub" min="0" max="1000" value="0" aria-label="Preview position">
-          <span class="time" id="timeLbl">0:00</span>
+
+      <div class="card demo" aria-label="Example: words and pauses being cut from a transcript">
+        <div class="demo-top"><span class="dot"></span><span class="dot"></span><span class="dot"></span><span>interview_take3.mp4</span><span class="rec">1080p · 29.97 fps</span></div>
+        <p class="demo-text">
+          So <span class="x d1">um,</span> the reason we started Lumen was simple. <span class="p d2">2.4s</span>
+          Editing a talk took us <span class="x d3">like, honestly,</span> longer than recording it.
+          Now we <span class="x d4">just uh</span> fix the transcript and the cut is done.
+        </p>
+        <div class="demo-strip" aria-hidden="true">
+          <i style="flex-grow:3"></i><i class="c" style="--g:.6;flex-grow:.6"></i><i style="flex-grow:5"></i><i class="c" style="--g:2.4;flex-grow:2.4"></i>
+          <i style="flex-grow:4"></i><i class="c" style="--g:1.2;flex-grow:1.2"></i><i style="flex-grow:4"></i><i class="c" style="--g:.7;flex-grow:.7"></i><i style="flex-grow:3"></i>
         </div>
-        <div class="meta" id="meta">Sample frame · <b>640×360</b></div>
+        <div class="demo-foot"><span>Example edit</span><span><b>0:19</b> from 0:24 · 4 cuts</span></div>
       </div>
-      <div class="sample-note" id="sampleNote"><span>This is a sample frame. Drop a video anywhere to start.</span><button class="btn primary small" id="openBtn2" type="button">Choose file</button></div>
-      <div class="drop" id="drop">Drop to load video</div>
-      <div class="loading" id="loading" hidden><div><div class="spin"></div>Reading video…</div></div>
-      <input type="file" id="file" accept="video/*,.mkv,.mov,.webm,.mp4,.ts" hidden>
     </section>
 
-    <aside class="panel">
-      <div class="group">
-        <div class="label">Resolution</div>
-        <div class="seg res" role="radiogroup" aria-label="Target resolution">
-          <input type="radio" name="res" id="r1080" value="1080" checked><label for="r1080">1080p<small>FHD</small></label>
-          <input type="radio" name="res" id="r1440" value="1440"><label for="r1440">2K<small>QHD</small></label>
-          <input type="radio" name="res" id="r2160" value="2160"><label for="r2160">4K<small>UHD</small></label>
-        </div>
+    <section aria-labelledby="tools-h">
+      <div class="section-head">
+        <h2 id="tools-h">Two tools, one private workspace</h2>
+        <p>Both run entirely on your computer's GPU and CPU. Close the tab and nothing is left on a server, because nothing was ever sent to one.</p>
       </div>
-
-      <div class="group">
-        <div class="label"><span>Detail</span><span class="val" id="detailVal">60</span></div>
-        <input type="range" id="detail" min="0" max="100" value="60" aria-label="Detail enhancement">
+      <div class="tools">
+        <a class="card tool-card" href="./edit/">
+          <h3>Edit <span class="kind">Transcript</span></h3>
+          <p>Cut video the way you edit a document.</p>
+          <ul>
+            <li>On-device transcription in 15+ languages</li>
+            <li>Select words, press Delete, and the video is cut</li>
+            <li>One-click pause trimming and filler removal</li>
+            <li>Export MP4 or WebM, plus captions (.srt)</li>
+          </ul>
+          <span class="go">Open the editor →</span>
+        </a>
+        <a class="card tool-card" href="./upscale/">
+          <h3>Upscale <span class="kind">GPU</span></h3>
+          <p>Sharper output for any screen.</p>
+          <ul>
+            <li>1080p, 2K and 4K in one click</li>
+            <li>Edge-aware reconstruction with sharpening</li>
+            <li>Before/after preview with zoom</li>
+            <li>Audio kept, phone rotation handled</li>
+          </ul>
+          <span class="go">Upscale a video →</span>
+        </a>
       </div>
+    </section>
 
-      <div class="group">
-        <div class="label">Quality</div>
-        <div class="seg" role="radiogroup" aria-label="Encoding quality">
-          <input type="radio" name="q" id="qm" value="medium"><label for="qm">Small</label>
-          <input type="radio" name="q" id="qh" value="high" checked><label for="qh">High</label>
-          <input type="radio" name="q" id="qv" value="veryhigh"><label for="qv">Max</label>
-        </div>
+    <section class="why" aria-label="Why Lumen">
+      <div>
+        <div class="ico"><svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5"><rect x="3" y="7" width="10" height="7" rx="1.5"/><path d="M5.5 7V5a2.5 2.5 0 0 1 5 0v2"/></svg></div>
+        <h3>Your footage stays yours</h3>
+        <p>Videos are read and processed in the browser. There is no upload step and no account to create.</p>
       </div>
-
-      <div class="group">
-        <div class="label">Format</div>
-        <div class="seg" role="radiogroup" aria-label="Container">
-          <input type="radio" name="fmt" id="fmp4" value="mp4" checked><label for="fmp4">MP4</label>
-          <input type="radio" name="fmt" id="fwebm" value="webm"><label for="fwebm">WebM</label>
-        </div>
+      <div>
+        <div class="ico"><svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M3 8.5 6.5 12 13 4.5"/></svg></div>
+        <h3>Free to export</h3>
+        <p>No watermark and no export limit. Your computer does the work, so there is nothing to meter.</p>
       </div>
-
-      <div class="out" id="outInfo">
-        <span>Output</span><b id="oDims">1920×1080</b>
-        <span>Scale</span><b id="oScale">3.00×</b>
-        <span>Codec</span><b id="oCodec">—</b>
+      <div>
+        <div class="ico"><svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M9 1.5 3.5 9H8l-1 5.5L12.5 7H8z"/></svg></div>
+        <h3>Fast on your hardware</h3>
+        <p>Speech recognition runs on WebGPU when available, and video encoding uses your GPU's hardware encoder.</p>
       </div>
-      <div class="warn" id="warn" hidden></div>
-      <div class="note" id="note" hidden></div>
+    </section>
 
-      <div class="spacer"></div>
-
-      <div class="progress" id="progress" hidden>
-        <div class="track"><div class="fill" id="fill"></div></div>
-        <div class="stats"><span><b id="pct">0%</b> · <span id="fps">0</span> fps</span><span id="eta">—</span></div>
+    <section aria-labelledby="how-h">
+      <div class="section-head"><h2 id="how-h">From raw take to finished cut</h2></div>
+      <div class="steps">
+        <div class="card step"><h3>Open a video</h3><p>MP4, MOV, WebM or MKV. Lumen transcribes it on your device; the speech model downloads once and is cached.</p></div>
+        <div class="card step"><h3>Edit the words</h3><p>Strike out mistakes, trim long pauses, remove filler words. Playback skips every cut so you hear the result immediately.</p></div>
+        <div class="card step"><h3>Export</h3><p>Save the edited video at its original size or upscaled to 4K, with matching captions and a clean transcript.</p></div>
       </div>
-      <div class="result" id="result" hidden>
-        <span class="ok" id="resultTitle">Done</span>
-        <video id="resultVideo" controls playsinline muted></video>
-        <div class="stats"><span id="resultSize">—</span><span id="resultTime">—</span></div>
-        <button class="btn ghost" id="saveBtn" type="button">Save video</button>
-      </div>
-      <div class="err" id="err" role="alert" hidden></div>
+    </section>
 
-      <button class="btn primary" id="goBtn" type="button" disabled>Upscale video</button>
-      <div class="foot">Bicubic reconstruction with anti-ringing, then contrast-adaptive sharpening. Audio is kept as is.</div>
-    </aside>
+    <footer class="foot">
+      <span>Lumen · Works best in Chrome, Edge and other Chromium browsers.</span>
+      <span><a href="./edit/">Edit</a> · <a href="./upscale/">Upscale</a> · <a href="https://github.com/Foundersmax/lumen-upscaler">Source</a></span>
+    </footer>
   </main>
 </div>
-<noscript><p style="padding:16px">Lumen needs JavaScript enabled.</p></noscript>
-<script type="module" src="./src/upscale/main.js"></script>
 </body>
 </html>

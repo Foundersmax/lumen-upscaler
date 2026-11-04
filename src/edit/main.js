@@ -1,21 +1,24 @@
 // Edit page: transcript-based video editing.
 import { Input, ALL_FORMATS, BlobSource } from "../../vendor/mediabunny.min.mjs";
-import { Doc, sanitizeWords, mapTime, cutAt, captionCues, toSRT, toText } from "./transcript.js";
-import { extractAudio16k, peaks as computePeaks } from "./audio.js";
+import { Doc, sanitizeWords, normWord, mapTime, cutAt, captionCues, toSRT, toText } from "./transcript.js";
+import { extractAudio16k, peaks as computePeaks, ASR_RATE } from "./audio.js";
 import { exportEdit, ExportCancelled } from "./export.js";
 import { getProject, putProject, projectKey } from "./store.js";
 import { QUALITY, CODEC_NAMES, RES_NAME, fmtTime, fmtBytes, even, store, targetSize, friendly, saveBlob } from "../engine/media.js";
 
 const $ = (id) => document.getElementById(id);
 const val = (name) => document.querySelector(`input[name="${name}"]:checked`)?.value;
-const video = $("video"), script = $("script"), strip = $("strip");
+const video = $("video"), script = $("script"), strip = $("strip"), dlg = $("exportDlg");
 
 const state = {
-  file: null, key: null, url: null, duration: 0, srcW: 0, srcH: 0, colorFix: false, hasAudio: false, atrack: null, input: null,
-  doc: null, cuts: [], kept: [], peaks: null, undo: [], redo: [],
+  file: null, key: null, url: null, duration: 0, srcW: 0, srcH: 0, colorFix: false, atrack: null, input: null,
+  doc: null, cuts: [], kept: [], peaks: null, audio: null, undo: [], redo: [],
   wordEls: [], gapEls: new Map(), nowIdx: -1, followUntil: 0,
+  find: { hits: [], len: 0, cur: -1 },
   transcribing: null, exporting: null, out: null, loadId: 0,
 };
+const busy = () => !!(state.transcribing || state.exporting);
+const show = (id, msg) => { const el = $(id); el.hidden = !msg; el.textContent = msg || ""; };
 
 /* =====================================================================
    Support check
@@ -34,12 +37,7 @@ function checkSupport() {
 }
 
 /* =====================================================================
-   Messages
-   ===================================================================== */
-const show = (id, msg) => { const el = $(id); el.hidden = !msg; el.textContent = msg || ""; };
-
-/* =====================================================================
-   Example transcript (shown before a file is opened)
+   Example transcript (before a file is opened)
    ===================================================================== */
 function renderExample() {
   const ex = [
@@ -48,7 +46,7 @@ function renderExample() {
     ["uh,", 1], ["really", 1], ["really", 0], ["simple:", 0], ["you", 0], ["edit", 0], ["the", 0], ["words,", 0], ["and", 0], ["the", 0],
     ["video", 0], ["follows.", 0],
   ];
-  script.textContent = "";
+  script.hidden = false; script.textContent = "";
   const tag = document.createElement("div"); tag.className = "example-tag"; tag.textContent = "Example";
   const p = document.createElement("p");
   for (const [t, cut] of ex) {
@@ -56,20 +54,22 @@ function renderExample() {
     const s = document.createElement("span"); s.className = "w" + (cut ? " cut" : ""); s.textContent = t; p.append(s, " ");
   }
   const help = document.createElement("p"); help.className = "help";
-  help.textContent = "Your transcript appears here. Struck-through words and pauses are cut from the video. Select text and press Delete to cut it.";
+  help.innerHTML = 'Your transcript appears here. Struck-through words and pauses are cut from the video.<br>Select text and press <span class="kbd">Delete</span> to cut it, double-click a word to fix its spelling, <span class="kbd">Space</span> to play.';
   script.append(tag, p, help);
+}
+function scriptMessage(msg) {
+  script.hidden = !msg; script.textContent = "";
+  if (msg) { const p = document.createElement("p"); p.className = "help"; p.textContent = msg; script.append(p); }
 }
 
 /* =====================================================================
-   Loading a file
+   Opening a file
    ===================================================================== */
-$("openBtn").onclick = (e) => { e.stopPropagation(); pickFile(); };
 $("empty").onclick = () => pickFile();
 $("empty").onkeydown = (e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); pickFile(); } };
 $("changeBtn").onclick = () => pickFile();
 function pickFile() { if (!busy()) $("file").click(); }
 $("file").addEventListener("change", (e) => { const f = e.target.files[0]; if (f) loadFile(f); e.target.value = ""; });
-const busy = () => !!(state.transcribing || state.exporting);
 
 let dragDepth = 0;
 const hasFiles = (e) => [...(e.dataTransfer?.types || [])].includes("Files");
@@ -83,9 +83,9 @@ window.addEventListener("drop", (e) => {
 });
 
 async function loadFile(file) {
-  if (busy()) return;
+  if (busy()) { show("err", "Finish or cancel the current task before opening another video."); return; }
   const id = ++state.loadId;
-  show("xErr", ""); show("xNote", ""); show("tErr", "");
+  show("err", ""); show("note", ""); show("tErr", "");
   $("loading").hidden = false; $("loadingText").textContent = "Reading video…";
   let input;
   try {
@@ -103,63 +103,59 @@ async function loadFile(file) {
 
     try { state.input?.dispose(); } catch {}
     if (state.url) URL.revokeObjectURL(state.url);
-    clearResult();
+    clearResult(); closeFind();
     Object.assign(state, {
-      file, key: projectKey(file), input, atrack: audioOk ? at : null, hasAudio: audioOk, duration,
+      file, key: projectKey(file), input, atrack: audioOk ? at : null, duration,
       srcW: vt.displayWidth, srcH: vt.displayHeight,
       colorFix: !cs?.matrix && Math.min(vt.codedWidth, vt.codedHeight) < 720,
-      doc: null, cuts: [], kept: [[0, duration]], peaks: null, undo: [], redo: [], nowIdx: -1,
+      doc: null, cuts: [], kept: [[0, duration]], peaks: null, audio: null, undo: [], redo: [], nowIdx: -1,
       url: URL.createObjectURL(file),
     });
     $("player").style.aspectRatio = `${state.srcW} / ${state.srcH}`;
     video.src = state.url; show("videoMsg", "");
-    $("empty").hidden = true; $("changeBtn").hidden = false; $("playBtn").disabled = false;
-    $("srcChip").hidden = false; $("srcChip").textContent = `${state.srcW}×${state.srcH} · ${fmtTime(duration)}`;
-    $("exportBtn").disabled = false;
+    $("empty").hidden = true; $("playBtn").disabled = false;
+    $("filebar").hidden = false;
+    const fname = $("fileName"); fname.textContent = ""; fname.title = file.name;
+    const b = document.createElement("b"); b.textContent = file.name;
+    fname.append(b, ` · ${state.srcW}×${state.srcH} · ${fmtTime(duration)}`);
+    $("exportOpen").disabled = false;
     updateResOptions();
 
     const saved = await getProject(state.key);
     if (saved?.doc?.words?.length && Math.abs(saved.doc.duration - duration) < 0.5) {
       state.doc = Doc.fromJSON(saved.doc);
       state.peaks = saved.peaks || null;
+      $("setup").hidden = true;
       renderScript(); afterEdit(false);
-      $("transcribe").hidden = true;
-      show("xNote", "Restored your transcript and edits for this file.");
+      show("note", "Restored your transcript and edits for this file.");
     } else {
-      script.textContent = "";
-      const p = document.createElement("p"); p.className = "help";
-      p.textContent = audioOk ? "Ready to transcribe. Choose accuracy and language below." : "This video has no audio Lumen can read, so it can't be transcribed. You can still export or upscale it.";
-      script.append(p);
-      $("transcribe").hidden = !audioOk;
+      $("setup").hidden = !audioOk;
+      scriptMessage(audioOk ? "" : "This video has no audio Lumen can read, so it can't be transcribed. You can still export or upscale it.");
       afterEdit(false);
     }
-    setToolsEnabled();
   } catch (err) {
     console.error(err);
     try { input?.dispose(); } catch {}
-    if (id === state.loadId) show("xErr", err.message || String(err));
+    if (id === state.loadId) show("err", err.message || String(err));
   } finally {
     if (id === state.loadId) $("loading").hidden = true;
   }
 }
 
-video.addEventListener("error", () => {
-  if (!state.file) return;
-  show("videoMsg", "Your browser can't preview this format. Editing and export still work.");
-});
+video.addEventListener("error", () => { if (state.file) show("videoMsg", "Your browser can't preview this format. Editing and export still work."); });
 video.addEventListener("loadedmetadata", () => drawStrip());
 
 /* =====================================================================
-   Transcription
+   Transcription (with pause/resume)
    ===================================================================== */
-for (const name of ["model"]) {
-  const saved = store.get(name); const el = saved && document.querySelector(`input[name="${name}"][value="${saved}"]`); if (el) el.checked = true;
-  for (const r of document.querySelectorAll(`input[name="${name}"]`)) r.addEventListener("change", () => store.set(name, r.value));
+{
+  const saved = store.get("model"); const el = saved && document.querySelector(`input[name="model"][value="${saved}"]`); if (el) el.checked = true;
+  for (const r of document.querySelectorAll('input[name="model"]')) r.addEventListener("change", () => store.set("model", r.value));
+  $("lang").value = store.get("lang", "");
+  $("lang").addEventListener("change", () => store.set("lang", $("lang").value));
 }
-$("lang").value = store.get("lang", "");
-$("lang").addEventListener("change", () => store.set("lang", $("lang").value));
-
 $("transcribeBtn").addEventListener("click", () => state.transcribing ? state.transcribing.cancel() : transcribe());
+$("resumeBtn").addEventListener("click", () => state.transcribing ? state.transcribing.cancel() : transcribe({ resume: true }));
 
 function setT(p, status, right = "") {
   $("tProgress").hidden = false;
@@ -167,57 +163,74 @@ function setT(p, status, right = "") {
   $("tStatus").textContent = status; $("tPct").textContent = right;
 }
 
-async function transcribe() {
+async function transcribe({ resume = false } = {}) {
   if (!state.atrack || busy()) return;
-  show("tErr", "");
+  const prev = resume ? state.doc : null;
+  const start = prev ? prev.limit : 0;
+  show("tErr", ""); show("note", "");
   const ac = new AbortController();
   let worker = null;
-  const cancelled = () => ac.signal.aborted;
   state.transcribing = { cancel: () => { ac.abort(); worker?.terminate(); } };
-  $("transcribeBtn").textContent = "Cancel";
+  $("setup").hidden = false; $("resume").hidden = true;
+  $("transcribeBtn").textContent = resume ? "Pause" : "Pause transcription";
   $("transcribeBtn").classList.replace("primary", "ghost");
   setToolsEnabled();
   const wake = await navigator.wakeLock?.request("screen").catch(() => null);
   const words = [];
+  let upTo = start;
   const live = document.createElement("p"); live.className = "livewords";
-  script.textContent = ""; script.append(live);
+  if (!prev) { script.hidden = false; script.textContent = ""; }
+  script.append(live);
   try {
-    setT(0, "Reading audio…");
-    const audio = await extractAudio16k(state.atrack, state.duration, (p) => setT(p, "Reading audio…", Math.round(p * 100) + "%"), ac.signal);
-    state.peaks = computePeaks(audio); drawStrip();
+    if (!state.audio) {
+      setT(0, "Reading audio…");
+      state.audio = await extractAudio16k(state.atrack, state.duration, (p) => setT(p, "Reading audio…", Math.round(p * 100) + "%"), ac.signal);
+      state.peaks = computePeaks(state.audio); drawStrip();
+    }
+    const audio = state.audio.slice(Math.floor(start * ASR_RATE));
     const size = val("model"), language = $("lang").value || null;
-    const onWords = (ws, progress) => {
+    const span = state.duration - start;
+    const onWords = (ws, progress, at) => {
       words.push(...ws);
+      upTo = at ?? start + progress * span;
       live.append(ws.map((w) => w.t.trim()).join(" ") + " ");
-      setT(progress, "Transcribing…", Math.round(progress * 100) + "%");
+      setT((upTo) / state.duration, "Transcribing…", `${fmtTime(upTo)} / ${fmtTime(state.duration)}`);
     };
+    setT(start / state.duration, "Starting speech engine…");
     if (window.__lumenMockTranscribe) {
-      await window.__lumenMockTranscribe(audio, { onWords, onStatus: (s) => setT(0, s), signal: ac.signal });
+      await window.__lumenMockTranscribe(audio, { offset: start, onWords, onStatus: (s) => setT(0, s), signal: ac.signal });
     } else {
       await new Promise((resolve, reject) => {
         worker = new Worker(new URL("./transcribe.worker.js", import.meta.url), { type: "module" });
         ac.signal.addEventListener("abort", () => reject(new DOMException("Cancelled", "AbortError")));
         worker.onerror = (e) => reject(new Error("The speech engine failed to start" + (e.message ? `: ${e.message}` : ".")));
         worker.onmessage = ({ data: m }) => {
-          if (m.type === "status") setT(0, m.text);
+          if (m.type === "status") setT(start / state.duration, m.text);
           else if (m.type === "download") setT(m.loaded / m.total, "Downloading speech model (first time only)…", `${fmtBytes(m.loaded)} / ${fmtBytes(m.total)}`);
-          else if (m.type === "words") onWords(m.words, m.progress);
+          else if (m.type === "words") onWords(m.words, m.progress, m.upTo);
           else if (m.type === "done") resolve(m);
           else if (m.type === "error") reject(new Error(m.message));
         };
-        worker.postMessage({ type: "run", audio, size, language }, [audio.buffer]);
+        worker.postMessage({ type: "run", audio, offset: start, size, language }, [audio.buffer]);
       });
     }
-    if (cancelled()) throw new DOMException("Cancelled", "AbortError");
-    const clean = sanitizeWords(words, state.duration);
-    if (!clean.length) throw new Error("No speech was found in this video. If it has speech, try the Accurate model or set the language.");
-    state.doc = new Doc(clean, state.duration); state.undo = []; state.redo = [];
-    renderScript(); afterEdit();
-    $("transcribe").hidden = true;
-    show("xNote", `Transcribed ${clean.length.toLocaleString()} words.`);
+    if (ac.signal.aborted) throw new DOMException("Cancelled", "AbortError");
+    finishTranscript(prev, words, state.duration);
+    if (!state.doc?.n) throw Object.assign(new Error("No speech was found in this video. If it has speech, try the Accurate model or set the language."), { noSpeech: true });
+    $("setup").hidden = true;
+    show("note", `Transcribed ${state.doc.n.toLocaleString()} words.`);
   } catch (e) {
-    if (e?.name === "AbortError" || cancelled()) { renderPlaceholder("Transcription cancelled."); }
-    else { console.error(e); show("tErr", friendly(e)); renderPlaceholder("Transcription didn't finish. Fix the problem below, then press Transcribe again."); }
+    const cancelled = e?.name === "AbortError" || ac.signal.aborted;
+    if (!e?.noSpeech && (words.length || prev)) {
+      // keep what was transcribed so far; the rest can be continued later
+      finishTranscript(prev, words, Math.max(start, upTo));
+      $("setup").hidden = true;
+      if (!cancelled) show("err", friendly(e));
+    } else {
+      if (!cancelled) show("tErr", friendly(e));
+      scriptMessage("");
+      state.doc = null; $("setup").hidden = false;
+    }
   } finally {
     worker?.terminate();
     wake?.release?.().catch(() => {});
@@ -225,59 +238,81 @@ async function transcribe() {
     $("tProgress").hidden = true;
     $("transcribeBtn").textContent = "Transcribe";
     $("transcribeBtn").classList.replace("ghost", "primary");
-    setToolsEnabled();
+    updateResume(); setToolsEnabled();
   }
 }
-function renderPlaceholder(msg) {
-  if (state.doc) return renderScript();
-  script.textContent = "";
-  if (msg) { const p = document.createElement("p"); p.className = "help"; p.textContent = msg; script.append(p); }
+
+/** Builds/extends the document from newly transcribed words. */
+function finishTranscript(prev, words, limit) {
+  const prevEnd = prev?.n ? prev.words[prev.n - 1].e : 0;
+  const clean = sanitizeWords(words, state.duration, prevEnd);
+  if (prev) state.doc = prev.extend(clean, limit);
+  else if (clean.length || limit < state.duration - 0.25) state.doc = new Doc(clean, state.duration, limit);
+  else state.doc = null;
+  if (!state.doc) return;
+  if (!prev) { state.undo = []; state.redo = []; }
+  renderScript(); afterEdit();
+}
+
+function updateResume() {
+  const d = state.doc, el = $("resume");
+  if (!d || d.complete || state.transcribing) { el.hidden = true; return; }
+  el.hidden = false;
+  $("resumeText").textContent = `Transcribed up to ${fmtTime(d.limit)} of ${fmtTime(d.duration)}.`;
 }
 
 /* =====================================================================
    Transcript rendering
    ===================================================================== */
-const SHOW_GAP = 0.6; // pauses at least this long get a visible marker
+const SHOW_GAP = 0.6;
 function renderScript() {
   const doc = state.doc; if (!doc) return;
-  script.textContent = "";
+  script.hidden = false; script.textContent = "";
   state.wordEls = new Array(doc.n); state.gapEls = new Map(); state.nowIdx = -1;
   const frag = document.createDocumentFragment();
-  let p = document.createElement("p"), inPara = 0;
+  let p = null, inPara = 0;
+  const newPara = (k) => {
+    if (p) frag.append(p);
+    p = document.createElement("p"); inPara = 0;
+    if (k < doc.n) { const st = document.createElement("span"); st.className = "stamp"; st.dataset.t = doc.words[k].s; st.textContent = fmtTime(doc.words[k].s); p.append(st); }
+  };
   const gapEl = (k) => {
     const g = document.createElement("span"); g.className = "gap"; g.dataset.g = k;
     g.textContent = doc.gapDur(k).toFixed(1) + "s"; g.title = "Pause. Click to cut or restore it.";
     state.gapEls.set(k, g); return g;
   };
+  newPara(0);
   for (let k = 0; k <= doc.n; k++) {
     const gd = doc.gapDur(k);
     const prev = k > 0 ? doc.words[k - 1].t : "";
-    if (k > 0 && k < doc.n && inPara > 0 && (gd >= 1.5 || (/[.?!]$/.test(prev) && (gd >= 0.6 || inPara > 70)))) {
-      frag.append(p); p = document.createElement("p"); inPara = 0;
-    }
-    if (gd >= SHOW_GAP) p.append(gapEl(k), " ");
+    if (k > 0 && k < doc.n && inPara > 0 && (gd >= 1.5 || (/[.?!]$/.test(prev) && (gd >= 0.6 || inPara > 70)))) newPara(k);
+    if (gd >= SHOW_GAP && (k < doc.n || doc.complete)) p.append(gapEl(k), " ");
     if (k === doc.n) break;
     const s = document.createElement("span"); s.className = "w"; s.dataset.i = k; s.textContent = doc.words[k].t;
     state.wordEls[k] = s; p.append(s, " "); inPara++;
   }
   frag.append(p);
   script.append(frag);
+  if (state.find.q) runFind($("findInput").value, false);
 }
 
 function updateClasses() {
   const doc = state.doc; if (!doc) return;
-  for (let i = 0; i < doc.n; i++) state.wordEls[i]?.classList.toggle("cut", !!doc.cutW[i]);
+  for (let i = 0; i < doc.n; i++) {
+    const el = state.wordEls[i]; if (!el) continue;
+    el.classList.toggle("cut", !!doc.cutW[i]);
+    if (el.contentEditable !== "true" && el.textContent !== doc.words[i].t) el.textContent = doc.words[i].t; // undo of a text fix
+  }
   for (const [k, el] of state.gapEls) el.classList.toggle("cut", doc.gapCut(k));
 }
 
 /* =====================================================================
-   Edits + undo
+   Edits, undo, autosave
    ===================================================================== */
 function edit(fn) {
   const doc = state.doc; if (!doc || state.exporting) return;
   const before = doc.snapshot();
-  const changed = fn(doc);
-  if (changed === false) return;
+  if (fn(doc) === false) return;
   state.undo.push(before); if (state.undo.length > 300) state.undo.shift();
   state.redo = [];
   afterEdit();
@@ -290,69 +325,82 @@ function afterEdit(persist = true) {
   const doc = state.doc;
   state.cuts = doc ? doc.cutIntervals() : [];
   state.kept = doc ? doc.keptRanges(state.cuts) : (state.duration ? [[0, state.duration]] : []);
-  updateClasses(); drawStrip(); updateStats(); updateExportInfo(); updateClock(); setToolsEnabled();
+  updateClasses(); drawStrip(); updateStats(); updateExportInfo(); updateClock(); updateResume(); setToolsEnabled();
   if (persist && doc && state.key) {
     clearTimeout(persistTimer);
+    $("saved").textContent = "Saving…";
     const key = state.key, snapshot = { doc: doc.toJSON(), peaks: state.peaks };
-    persistTimer = setTimeout(() => putProject(key, snapshot), 400);
+    persistTimer = setTimeout(async () => {
+      const ok = await putProject(key, snapshot);
+      $("saved").textContent = ok === null ? "Not saved in this browser" : "Saved";
+    }, 400);
   }
 }
 
 function updateStats() {
   const doc = state.doc;
-  if (!doc) { $("stats").textContent = ""; $("cutChip").hidden = true; return; }
+  if (!doc) { $("cutChip").hidden = true; return; }
   const removed = doc.removedSeconds(state.cuts);
-  $("stats").textContent = `${doc.n.toLocaleString()} words`;
   $("cutChip").hidden = removed < 0.05;
   $("cutChip").textContent = `−${fmtTime(removed)} · ${state.cuts.length} cut${state.cuts.length === 1 ? "" : "s"}`;
 }
 
 function setToolsEnabled() {
   const has = !!state.doc && !busy();
-  for (const id of ["trimBtn", "pauseLen", "fillerBtn", "restoreBtn"]) $(id).disabled = !has;
+  for (const id of ["trimBtn", "pauseLen", "fillerBtn", "restoreBtn", "findBtn"]) $(id).disabled = !has;
   $("undoBtn").disabled = !has || !state.undo.length;
   $("redoBtn").disabled = !has || !state.redo.length;
-  $("srtBtn").disabled = $("txtBtn").disabled = !state.doc;
-  $("exportBtn").disabled = !state.file || !!state.transcribing;
+  $("srtBtn").disabled = $("txtBtn").disabled = !state.doc?.n;
+  $("exportOpen").disabled = !state.file || !!state.transcribing;
   $("changeBtn").disabled = busy();
+  $("resumeBtn").disabled = !!state.exporting;
 }
 
 $("trimBtn").onclick = () => edit((d) => {
   const n = d.trimPauses(+$("pauseLen").value);
-  show("xNote", n ? `Cut ${n} pause${n === 1 ? "" : "s"}.` : "No pauses that long were left to cut.");
+  show("note", n ? `Cut ${n} pause${n === 1 ? "" : "s"}.` : "No pauses that long are left to cut.");
   return n > 0;
 });
 $("fillerBtn").onclick = () => edit((d) => {
   const n = d.removeFillers();
-  show("xNote", n ? `Cut ${n} filler word${n === 1 ? "" : "s"}.` : "No filler words found. Speech models often leave them out of the transcript; Trim pauses removes the gaps they leave.");
+  show("note", n ? `Cut ${n} filler word${n === 1 ? "" : "s"}.` : "No filler words found. Speech models often leave them out of the transcript; Trim pauses removes the gaps they leave.");
   return n > 0;
 });
-$("restoreBtn").onclick = () => edit((d) => { const had = d.cutW.some(Boolean) || d.cutG.some(Boolean); d.restoreAll(); return had; });
+$("restoreBtn").onclick = () => edit((d) => { const had = d.cutW.some(Boolean) || d.cutG.some(Boolean); d.restoreAll(); if (had) show("note", "Restored everything. Undo brings the cuts back."); return had; });
 $("undoBtn").onclick = undo; $("redoBtn").onclick = redo;
 
-/* ---------- selection → cut/restore ---------- */
+/* =====================================================================
+   Selection → cut / restore
+   ===================================================================== */
+/** Word indices [lo, hi] intersecting range r, found by binary search on document order. */
+function wordSpan(r) {
+  const els = state.wordEls, n = els.length;
+  let lo = 0, hi = n - 1, first = n;
+  while (lo <= hi) { const m = (lo + hi) >> 1; if (r.comparePoint(els[m], els[m].childNodes.length) >= 0) { first = m; hi = m - 1; } else lo = m + 1; }
+  lo = 0; hi = n - 1; let last = -1;
+  while (lo <= hi) { const m = (lo + hi) >> 1; if (r.comparePoint(els[m], 0) <= 0) { last = m; lo = m + 1; } else hi = m - 1; }
+  return first <= last ? [first, last] : null;
+}
 function selectedTokens() {
   const sel = getSelection();
-  if (!state.doc || !sel.rangeCount || sel.isCollapsed) return null;
+  if (!state.doc || !sel.rangeCount || sel.isCollapsed || !state.wordEls.length) return null;
   const r = sel.getRangeAt(0);
   if (!script.contains(r.commonAncestorContainer)) return null;
-  const words = [], gaps = [];
-  // Narrow the scan using the first/last word elements around the range endpoints.
-  for (let i = 0; i < state.wordEls.length; i++) { const el = state.wordEls[i]; if (el && r.intersectsNode(el)) words.push(i); }
+  const span = wordSpan(r), words = [];
+  if (span) for (let i = span[0]; i <= span[1]; i++) words.push(i);
+  const gaps = [];
   for (const [k, el] of state.gapEls) if (r.intersectsNode(el)) gaps.push(k);
   if (!words.length && !gaps.length) return null;
   return { words, gaps, rect: r.getBoundingClientRect() };
 }
-function applySelection(mode) { // "cut" | "restore" | "toggle"
+function applySelection(mode) {
   const t = selectedTokens(); if (!t) return false;
   edit((d) => {
     const allCut = t.words.every((i) => d.cutW[i]) && t.gaps.every((k) => d.gapCut(k));
     const cut = mode === "cut" || (mode === "toggle" && !allCut);
     for (const i of t.words) d.cutW[i] = cut ? 1 : 0;
     for (const k of t.gaps) d.cutG[k] = cut ? 1 : 0;
-    if (!cut) { // restoring words also restores the pauses inside the selection
-      for (let i = 1; i < t.words.length; i++) if (t.words[i] === t.words[i - 1] + 1) d.cutG[t.words[i]] = 0;
-    }
+    if (!cut) for (let j = 1; j < t.words.length; j++) d.cutG[t.words[j]] = 0; // pauses inside a restored selection
   });
   getSelection().removeAllRanges(); $("seltool").hidden = true;
   return true;
@@ -360,7 +408,7 @@ function applySelection(mode) { // "cut" | "restore" | "toggle"
 $("selCut").onclick = () => applySelection("cut");
 $("selRestore").onclick = () => applySelection("restore");
 $("selPlay").onclick = () => {
-  const t = selectedTokens(); if (!t || !t.words.length) return;
+  const t = selectedTokens(); if (!t?.words.length) return;
   seek(state.doc.words[t.words[0]].s); play();
   getSelection().removeAllRanges(); $("seltool").hidden = true;
 };
@@ -369,22 +417,24 @@ document.addEventListener("selectionchange", () => {
   cancelAnimationFrame(selRaf);
   selRaf = requestAnimationFrame(() => {
     const t = selectedTokens(), tool = $("seltool");
-    if (!t || state.exporting) { tool.hidden = true; return; }
+    if (!t || state.exporting || editing) { tool.hidden = true; return; }
     const r = t.rect;
     tool.hidden = false;
-    const x = Math.min(Math.max(r.left + r.width / 2, 90), innerWidth - 90);
-    tool.style.left = x + "px"; tool.style.top = Math.max(r.top, 56) + "px";
+    tool.style.left = Math.min(Math.max(r.left + r.width / 2, 100), innerWidth - 100) + "px";
+    tool.style.top = Math.max(r.top, 64) + "px";
   });
 });
 script.addEventListener("scroll", () => { $("seltool").hidden = true; state.followUntil = performance.now() + 3000; }, { passive: true });
 
 script.addEventListener("click", (e) => {
-  if (!getSelection().isCollapsed) return;
+  if (!getSelection().isCollapsed || editing) return;
+  const st = e.target.closest(".stamp");
+  if (st) { seek(+st.dataset.t); state.followUntil = 0; return; }
   const g = e.target.closest(".gap");
   if (g && state.doc && g.dataset.g !== undefined) {
     const k = +g.dataset.g;
     edit((d) => {
-      if ((k > 0 && d.cutW[k - 1]) || (k < d.n && d.cutW[k])) return false; // removed along with a cut word
+      if ((k > 0 && d.cutW[k - 1]) || (k < d.n && d.cutW[k])) return false; // removed together with a cut word
       d.cutG[k] = d.cutG[k] ? 0 : 1;
     });
     return;
@@ -392,6 +442,88 @@ script.addEventListener("click", (e) => {
   const w = e.target.closest(".w");
   if (w && state.doc && w.dataset.i !== undefined) { seek(state.doc.words[+w.dataset.i].s); state.followUntil = 0; }
 });
+
+/* ---------- fix a word's text (double-click) ---------- */
+let editing = null;
+script.addEventListener("dblclick", (e) => {
+  const w = e.target.closest(".w");
+  if (!w || !state.doc || w.dataset.i === undefined || state.exporting || state.transcribing) return;
+  startWordEdit(+w.dataset.i);
+});
+function startWordEdit(i) {
+  const el = state.wordEls[i]; if (!el) return;
+  editing = { i, el, old: state.doc.words[i].t };
+  $("seltool").hidden = true;
+  el.contentEditable = "true"; el.spellcheck = true; el.focus();
+  const r = document.createRange(); r.selectNodeContents(el); const s = getSelection(); s.removeAllRanges(); s.addRange(r);
+}
+function endWordEdit(commit) {
+  const ed = editing; if (!ed) return;
+  editing = null;
+  ed.el.contentEditable = "false"; ed.el.removeAttribute("contenteditable");
+  const text = ed.el.textContent.replace(/\s+/g, " ").trim();
+  if (commit && text && text !== ed.old) edit((d) => { d.words[ed.i].t = text; });
+  else ed.el.textContent = ed.old;
+  getSelection().removeAllRanges();
+}
+script.addEventListener("keydown", (e) => {
+  if (!editing) return;
+  if (e.key === "Enter") { e.preventDefault(); endWordEdit(true); }
+  else if (e.key === "Escape") { e.preventDefault(); endWordEdit(false); }
+  e.stopPropagation();
+});
+script.addEventListener("focusout", (e) => { if (editing && e.target === editing.el) endWordEdit(true); });
+script.addEventListener("paste", (e) => { if (!editing) return; e.preventDefault(); document.execCommand("insertText", false, e.clipboardData.getData("text/plain").replace(/\s+/g, " ")); });
+
+/* =====================================================================
+   Find
+   ===================================================================== */
+$("findBtn").onclick = () => ($("findbar").hidden ? openFind() : closeFind());
+function openFind() { if (!state.doc) return; $("findbar").hidden = false; $("findBtn").setAttribute("aria-pressed", "true"); $("findInput").focus(); $("findInput").select(); }
+function closeFind() { $("findbar").hidden = true; $("findBtn").setAttribute("aria-pressed", "false"); clearFind(); state.find.q = ""; }
+function clearFind() { for (const el of script.querySelectorAll(".w.find")) el.classList.remove("find", "cur"); }
+function runFind(q, jump = true) {
+  clearFind();
+  const toks = q.split(/\s+/).map(normWord).filter(Boolean);
+  const f = state.find; f.q = q; f.hits = []; f.len = toks.length; f.cur = -1;
+  const doc = state.doc;
+  if (doc && toks.length) {
+    const norm = doc.words.map((w) => normWord(w.t));
+    outer: for (let i = 0; i + toks.length <= norm.length; i++) {
+      for (let j = 0; j < toks.length; j++) {
+        const last = j === toks.length - 1;
+        if (last ? !norm[i + j].startsWith(toks[j]) : norm[i + j] !== toks[j]) continue outer;
+      }
+      f.hits.push(i);
+    }
+    for (const i of f.hits) for (let j = 0; j < f.len; j++) state.wordEls[i + j]?.classList.add("find");
+  }
+  if (jump && f.hits.length) gotoHit(0); else updateFindCount();
+}
+function gotoHit(k) {
+  const f = state.find; if (!f.hits.length) return;
+  for (const el of script.querySelectorAll(".w.cur")) el.classList.remove("cur");
+  f.cur = (k + f.hits.length) % f.hits.length;
+  const i = f.hits[f.cur];
+  for (let j = 0; j < f.len; j++) state.wordEls[i + j]?.classList.add("cur");
+  state.wordEls[i]?.scrollIntoView({ block: "center", behavior: "smooth" });
+  seek(state.doc.words[i].s); state.followUntil = performance.now() + 2000;
+  updateFindCount();
+}
+function updateFindCount() { const f = state.find; $("findCount").textContent = f.q.trim() ? (f.hits.length ? `${f.cur + 1 || 0} of ${f.hits.length}` : "0") : ""; }
+let findTimer = 0;
+$("findInput").addEventListener("input", () => { clearTimeout(findTimer); findTimer = setTimeout(() => runFind($("findInput").value), 120); });
+$("findInput").addEventListener("keydown", (e) => {
+  if (e.key === "Enter") { e.preventDefault(); gotoHit(state.find.cur + (e.shiftKey ? -1 : 1)); }
+  if (e.key === "Escape") { e.preventDefault(); closeFind(); script.focus(); }
+});
+$("findNext").onclick = () => gotoHit(state.find.cur + 1);
+$("findPrev").onclick = () => gotoHit(state.find.cur - 1);
+$("findCut").onclick = () => {
+  const f = state.find; if (!f.hits.length) return;
+  edit((d) => { for (const i of f.hits) for (let j = 0; j < f.len; j++) d.cutW[i + j] = 1; });
+  show("note", `Cut ${f.hits.length} match${f.hits.length === 1 ? "" : "es"}.`);
+};
 
 /* =====================================================================
    Playback that skips cuts
@@ -405,7 +537,7 @@ function play() {
   video.play().catch(() => {});
 }
 function pause() { video.pause(); }
-function seek(t) { video.currentTime = Math.max(0, Math.min(state.duration, t)); updateClock(); highlightNow(); drawStrip(); }
+function seek(t) { if (!state.file) return; video.currentTime = Math.max(0, Math.min(state.duration, t)); updateClock(); highlightNow(); drawStrip(); }
 $("playBtn").onclick = () => (video.paused ? play() : pause());
 video.addEventListener("play", () => { $("playIcon").innerHTML = PAUSE; $("playBtn").setAttribute("aria-label", "Pause"); loop(); });
 video.addEventListener("pause", () => { $("playIcon").innerHTML = PLAY; $("playBtn").setAttribute("aria-label", "Play"); });
@@ -413,7 +545,7 @@ video.addEventListener("seeked", () => { updateClock(); highlightNow(); drawStri
 
 function loop() {
   if (video.paused) return;
-  const t = video.currentTime, c = cutAt(t, state.cuts, 0.03);
+  const c = cutAt(video.currentTime, state.cuts, 0.03);
   if (c) {
     if (c[1] >= state.duration - 0.05) { video.pause(); video.currentTime = Math.max(0, c[0] - 0.01); }
     else video.currentTime = c[1];
@@ -423,11 +555,11 @@ function loop() {
 }
 
 function updateClock() {
+  const el = $("clock");
   if (!state.file) return;
   const removed = state.doc ? state.doc.removedSeconds(state.cuts) : 0;
-  $("clock").innerHTML = "";
-  $("clock").append(fmtTime(mapTime(video.currentTime || 0, state.cuts)) + " ");
-  const s = document.createElement("span"); s.textContent = `/ ${fmtTime(state.duration - removed)}`; $("clock").append(s);
+  el.textContent = fmtTime(mapTime(video.currentTime || 0, state.cuts)) + " ";
+  const s = document.createElement("span"); s.textContent = `/ ${fmtTime(state.duration - removed)}`; el.append(s);
 }
 
 function highlightNow() {
@@ -445,41 +577,40 @@ function highlightNow() {
 }
 
 /* ---------- timeline strip ---------- */
-const css = (name) => getComputedStyle(document.documentElement).getPropertyValue(name).trim();
+const cssVar = (name) => getComputedStyle(document.documentElement).getPropertyValue(name).trim();
 let stripColors = null;
 matchMedia("(prefers-color-scheme: dark)").addEventListener?.("change", () => { stripColors = null; drawStrip(); });
 function drawStrip() {
   const dpr = devicePixelRatio || 1, w = strip.clientWidth, h = strip.clientHeight;
   if (!w) return;
   if (strip.width !== Math.round(w * dpr) || strip.height !== Math.round(h * dpr)) { strip.width = Math.round(w * dpr); strip.height = Math.round(h * dpr); }
-  stripColors ||= { bg: css("--raise"), wave: css("--muted"), keep: css("--accent"), cut: css("--danger"), head: css("--fg"), line: css("--line") };
+  stripColors ||= { bg: cssVar("--raise"), keep: cssVar("--accent"), cut: cssVar("--danger"), head: cssVar("--fg"), muted: cssVar("--muted") };
   const g = strip.getContext("2d"), C = stripColors;
   g.setTransform(dpr, 0, 0, dpr, 0, 0);
   g.clearRect(0, 0, w, h);
-  g.fillStyle = C.bg; g.beginPath(); g.roundRect?.(0, 0, w, h, 6); g.fill();
+  g.fillStyle = C.bg; g.beginPath(); g.roundRect ? g.roundRect(0, 0, w, h, 6) : g.rect(0, 0, w, h); g.fill();
   const D = state.duration; if (!D) return;
   const x = (t) => (t / D) * w;
-  // waveform
   const pk = state.peaks;
-  g.fillStyle = C.keep; g.globalAlpha = 0.75;
+  g.fillStyle = C.keep; g.globalAlpha = 0.8;
   if (pk) {
     const n = Math.floor(w / 2);
     for (let i = 0; i < n; i++) {
       const v = pk[Math.min(pk.length - 1, Math.floor((i / n) * pk.length))];
       const bh = Math.max(1, v * (h - 10)); g.fillRect(i * 2, (h - bh) / 2, 1.2, bh);
     }
-  } else { g.fillRect(0, h / 2 - 1, w, 2); }
+  } else g.fillRect(0, h / 2 - 1, w, 2);
   g.globalAlpha = 1;
-  // cuts
+  // untranscribed part of a paused transcription
+  if (state.doc && !state.doc.complete) { g.fillStyle = C.bg; g.globalAlpha = 0.6; g.fillRect(x(state.doc.limit), 0, w - x(state.doc.limit), h); g.globalAlpha = 1; }
   for (const [a, b] of state.cuts) {
     const x0 = x(a), x1 = Math.max(x0 + 1, x(b));
-    g.fillStyle = C.bg; g.globalAlpha = 0.7; g.fillRect(x0, 0, x1 - x0, h);
+    g.fillStyle = C.bg; g.globalAlpha = 0.75; g.fillRect(x0, 0, x1 - x0, h);
     g.globalAlpha = 1; g.save(); g.beginPath(); g.rect(x0, 0, x1 - x0, h); g.clip();
     g.strokeStyle = C.cut; g.globalAlpha = 0.55; g.lineWidth = 1.2;
     for (let s = x0 - h; s < x1; s += 6) { g.beginPath(); g.moveTo(s, h); g.lineTo(s + h, 0); g.stroke(); }
     g.restore(); g.globalAlpha = 1;
   }
-  // playhead
   if (state.file) { g.fillStyle = C.head; g.fillRect(Math.round(x(video.currentTime || 0)) - 1, 0, 2, h); }
 }
 new ResizeObserver(() => drawStrip()).observe(strip);
@@ -488,27 +619,35 @@ const stripSeek = (e) => { const r = strip.getBoundingClientRect(); seek(((e.cli
 strip.addEventListener("pointerdown", (e) => { if (!state.file) return; scrubbing = true; strip.setPointerCapture(e.pointerId); stripSeek(e); });
 strip.addEventListener("pointermove", (e) => { if (scrubbing) stripSeek(e); });
 strip.addEventListener("pointerup", () => { scrubbing = false; });
+strip.addEventListener("pointercancel", () => { scrubbing = false; });
 
 /* =====================================================================
    Keyboard
    ===================================================================== */
 window.addEventListener("keydown", (e) => {
+  if (editing) return;
   const tag = e.target.tagName, typing = /^(INPUT|SELECT|TEXTAREA)$/.test(tag) || e.target.isContentEditable;
-  const mod = e.ctrlKey || e.metaKey;
-  if (mod && e.key.toLowerCase() === "z" && !typing) { e.preventDefault(); e.shiftKey ? redo() : undo(); return; }
-  if (mod && e.key.toLowerCase() === "y" && !typing) { e.preventDefault(); redo(); return; }
+  const mod = e.ctrlKey || e.metaKey, k = e.key.toLowerCase();
+  if (dlg.open) return;
+  if (mod && k === "f" && state.doc) { e.preventDefault(); openFind(); return; }
+  if (mod && k === "z" && !typing) { e.preventDefault(); e.shiftKey ? redo() : undo(); return; }
+  if (mod && k === "y" && !typing) { e.preventDefault(); redo(); return; }
   if ((e.key === "Delete" || e.key === "Backspace") && !typing) { if (applySelection("toggle")) e.preventDefault(); return; }
   if (e.key === " " && !typing && tag !== "BUTTON" && state.file) { e.preventDefault(); video.paused ? play() : pause(); return; }
   if (e.key === "Escape") { getSelection().removeAllRanges(); $("seltool").hidden = true; }
 });
 
 /* =====================================================================
-   Export
+   Export dialog
    ===================================================================== */
 for (const name of ["res", "fmt"]) {
   const saved = store.get("edit." + name); const el = saved && document.querySelector(`input[name="${name}"][value="${saved}"]`); if (el) el.checked = true;
   for (const r of document.querySelectorAll(`input[name="${name}"]`)) r.addEventListener("change", () => { store.set("edit." + name, r.value); updateExportInfo(); });
 }
+$("exportOpen").onclick = () => { if (!state.file) return; pause(); updateResOptions(); updateExportInfo(); dlg.showModal(); };
+$("exportClose").onclick = () => dlg.close();
+dlg.addEventListener("click", (e) => { if (e.target === dlg) dlg.close(); }); // click on backdrop
+
 function outDims() {
   const res = val("res");
   if (res === "orig" || !state.srcW) return [even(state.srcW), even(state.srcH)];
@@ -524,16 +663,17 @@ function updateResOptions() {
 function updateExportInfo() {
   if (!state.file) { $("oDims").textContent = "—"; $("oLen").textContent = "—"; return; }
   const [w, h] = outDims();
-  $("oDims").textContent = `${w}×${h}` + (val("res") === "orig" ? "" : ` · upscaled to ${RES_NAME[val("res")]}`);
+  $("oDims").textContent = `${w}×${h}` + (val("res") === "orig" ? "" : ` · upscaled`);
   const len = state.kept.reduce((s, [a, b]) => s + b - a, 0);
   $("oLen").textContent = fmtTime(len) + (len < state.duration - 0.05 ? ` (from ${fmtTime(state.duration)})` : "");
 }
-
 function clearResult() {
   $("result").hidden = true;
+  $("exportBtn").textContent = "Export video"; $("exportBtn").classList.add("primary"); $("exportBtn").classList.remove("ghost");
   if (state.out?.url) URL.revokeObjectURL(state.out.url);
   $("resultVideo").removeAttribute("src"); $("resultVideo").load();
   state.out = null;
+  $("exportOpen").textContent = "Export"; $("exportOpen").classList.remove("exporting");
 }
 
 $("exportBtn").addEventListener("click", () => state.exporting ? state.exporting.abort() : doExport());
@@ -556,6 +696,7 @@ async function doExport() {
         $("xFill").style.width = (p * 100).toFixed(1) + "%"; $("xPct").textContent = Math.floor(p * 100) + "%";
         $("xFps").textContent = (frames / Math.max(el, 0.001)).toFixed(1);
         $("xEta").textContent = p > 0.02 ? `${fmtTime(el / p - el)} left` : "starting…";
+        $("exportOpen").textContent = `Exporting ${Math.floor(p * 100)}%`;
       },
     });
     const secs = (performance.now() - t0) / 1000;
@@ -568,9 +709,12 @@ async function doExport() {
     $("resultTime").textContent = `made in ${fmtTime(secs)}`;
     $("result").hidden = false;
     if (audioNote) show("xNote", audioNote);
+    if (!dlg.open) dlg.showModal();
+    $("exportOpen").textContent = "Export ready";
   } catch (e) {
     if (e instanceof ExportCancelled) show("xNote", "Export cancelled.");
-    else { console.error(e); show("xErr", friendly(e)); }
+    else { console.error(e); show("xErr", friendly(e)); if (!dlg.open) dlg.showModal(); }
+    $("exportOpen").textContent = "Export";
   } finally {
     wake?.release?.().catch(() => {});
     state.exporting = null; setExporting(false);
@@ -578,8 +722,10 @@ async function doExport() {
 }
 function setExporting(b) {
   $("xProgress").hidden = !b;
-  $("exportBtn").textContent = b ? "Cancel export" : "Export video";
-  $("exportBtn").classList.toggle("primary", !b); $("exportBtn").classList.toggle("ghost", b);
+  $("exportBtn").textContent = b ? "Cancel export" : (state.out ? "Export again" : "Export video");
+  const primary = !b && !state.out; // once a result exists, "Save video" is the primary action
+  $("exportBtn").classList.toggle("primary", primary); $("exportBtn").classList.toggle("ghost", !primary);
+  $("exportOpen").classList.toggle("exporting", b);
   for (const el of document.querySelectorAll('input[name="fmt"]')) el.disabled = b;
   if (b) { $("xFill").style.width = "0"; $("xPct").textContent = "0%"; $("xFps").textContent = "0"; $("xEta").textContent = "starting…"; }
   updateResOptions(); setToolsEnabled();
@@ -595,5 +741,5 @@ window.addEventListener("beforeunload", (e) => { if (busy()) { e.preventDefault(
 /* =====================================================================
    Boot
    ===================================================================== */
-if (checkSupport()) { renderExample(); drawStrip(); setToolsEnabled(); $("exportBtn").disabled = true; }
-window.__edit = { state, loadFile, transcribe, doExport, undo, redo, applySelection, edit };
+if (checkSupport()) { renderExample(); drawStrip(); setToolsEnabled(); }
+window.__edit = { state, loadFile, transcribe, doExport, undo, redo, applySelection, edit, runFind };

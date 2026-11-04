@@ -5,14 +5,14 @@ import { readFileSync, writeFileSync, mkdirSync, cpSync, rmSync, readdirSync, st
 import { join } from "node:path";
 import { createHash } from "node:crypto";
 
-const COPY = ["index.html", "edit", "src", "vendor", "favicon.svg", "public/_headers"];
+const COPY = ["index.html", "404.html", "edit", "upscale", "src", "vendor", "favicon.svg", "public/_headers"];
 rmSync("dist", { recursive: true, force: true });
 mkdirSync("dist", { recursive: true });
 for (const p of COPY) cpSync(p, join("dist", p === "public/_headers" ? "_headers" : p), { recursive: true });
 
 // Version = hash of all source files; appended to local .js/.css URLs in HTML and JS imports.
 const walk = (d) => readdirSync(d).flatMap((f) => { const p = join(d, f); return statSync(p).isDirectory() ? walk(p) : [p]; });
-const srcFiles = ["index.html", ...walk("edit"), ...walk("src")];
+const srcFiles = ["index.html", ...walk("edit"), ...walk("upscale"), ...walk("src")];
 const v = createHash("sha256").update(srcFiles.map((f) => readFileSync(f)).join("")).digest("hex").slice(0, 10);
 for (const f of walk("dist").filter((f) => /\.(html|js)$/.test(f) && !f.includes(`${join("dist", "vendor")}`))) {
   const s = readFileSync(f, "utf8")

@@ -1,11 +1,11 @@
 # Lumen
 
-**Live:** https://wetnix.com (editor: https://wetnix.com/edit/)
+**Live:** https://wetnix.com · editor https://wetnix.com/edit/ · upscaler https://wetnix.com/upscale/
 
 Private, in-browser video tools. Everything runs on the user's device (WebCodecs, WebGL2, WebGPU/WASM); files never leave it.
 
-- **Edit** (`/edit/`): edit video by editing its transcript. On-device Whisper transcription with word timestamps, select words and press Delete to cut, one-click pause trimming and filler removal, undo/redo, playback that skips cuts, waveform timeline, export to MP4/WebM (optionally upscaled), captions (.srt) and transcript (.txt). Projects are saved in the browser and restored when the same file is reopened.
-- **Upscale** (`/`): upscale video to 1080p, 2K or 4K with a GPU pipeline (Catmull-Rom with anti-ringing + contrast-adaptive sharpening) and a before/after preview.
+- **Edit** (`/edit/`): edit video by editing its transcript. On-device Whisper transcription with word timestamps, select words and press Delete to cut, one-click pause trimming and filler removal, undo/redo, playback that skips cuts, waveform timeline, export to MP4/WebM (optionally upscaled), captions (.srt) and transcript (.txt). Transcription can be paused and continued later; double-click a word to fix its text; find in transcript with "cut all". Projects are saved in the browser and restored when the same file is reopened.
+- **Upscale** (`/upscale/`): upscale video to 1080p, 2K or 4K with a GPU pipeline (Catmull-Rom with anti-ringing + contrast-adaptive sharpening) and a before/after preview.
 
 ## Develop
 No bundler or dependencies to install. Fetch the pinned third-party builds once, then serve the repo root:
@@ -14,7 +14,8 @@ No bundler or dependencies to install. Fetch the pinned third-party builds once,
     python3 -m http.server 8000     # → http://localhost:8000/ and /edit/
 
 ## Layout
-    index.html, edit/index.html   pages
+    index.html                    home page
+    edit/, upscale/               tool pages
     src/engine/                   shared: GPU upscaler, chunked output sink, codecs/helpers
     src/upscale/main.js           Upscale page
     src/edit/                     Edit page: transcript model, audio extraction, Whisper worker, export, storage
