@@ -38,6 +38,7 @@ export class ExportCancelled extends Error { constructor() { super("Export cance
  * @param {boolean} o.colorFix apply BT.601 fix for untagged SD sources
  * @param {(p:number, info:{frames:number})=>void} o.onProgress
  * @param {AbortSignal} o.signal
+ * @param {(t:number) => number[]} [o.cropAt] source crop [x,y,w,h] (normalised) for the frame at source time t
  * @param {{settings, profile, pre:number, post:number}} [o.audioFx] voice enhancement (see enhance.js)
  * @param {(ranges:[number,number][]) => ((ctx, t:number, w:number, h:number) => void) | null} [o.overlay]
  *   called with the final (frame-snapped) ranges; returns a function that draws on each output frame
@@ -122,7 +123,7 @@ async function attempt(o, { codec, hw }) {
               const ctx = rot.getContext("2d"); ctx.clearRect(0, 0, dw, dh);
               s.drawWithFit(ctx, { fit: "fill" }); src = rot; sw = dw; sh = dh;
             }
-            gpu.render(src, sw, sh, o.ow, o.oh, o.sharp);
+            gpu.render(src, sw, sh, o.ow, o.oh, o.sharp, o.cropAt ? o.cropAt(start) : undefined);
             let frame = gpu.canvas;
             if (drawOverlay) { compCtx.drawImage(gpu.canvas, 0, 0); drawOverlay(compCtx, ts, o.ow, o.oh); frame = comp; }
             const out = new VideoSample(frame, { timestamp: ts, duration: end - start });

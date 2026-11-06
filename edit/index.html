@@ -2,6 +2,8 @@
 <html lang="en">
 <head>
 <meta charset="utf-8">
+<!-- Enforced in the page itself because GitHub Pages can't send security headers: only this site and the speech-model host may be contacted. -->
+<meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' 'wasm-unsafe-eval'; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src https://fonts.gstatic.com; img-src 'self' data: blob:; media-src 'self' blob:; worker-src 'self' blob:; connect-src 'self' blob: data: https://huggingface.co https://*.huggingface.co https://*.hf.co; object-src 'none'; base-uri 'self'">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <title>Lumen Editor</title>
 <meta name="description" content="Edit video by editing its transcript. On-device transcription, one-click pause and filler removal, private: files never leave your device.">
@@ -69,6 +71,39 @@
       </div>
       <div class="note" id="note" hidden></div>
       <div class="err" id="err" role="alert" hidden></div>
+
+      <section class="card cap-card" id="rfCard" aria-label="Reframe">
+        <div class="cap-head">
+          <div>
+            <div class="cap-title">Reframe</div>
+            <div class="cap-sub" id="rfSub">Make vertical or square versions for Shorts, Reels and TikTok.</div>
+          </div>
+        </div>
+        <div class="seg" role="radiogroup" aria-label="Frame shape">
+          <input type="radio" name="rfAspect" id="raOrig" value="orig" checked><label for="raOrig">Original<small>as shot</small></label>
+          <input type="radio" name="rfAspect" id="ra916" value="9:16"><label for="ra916">9:16<small>vertical</small></label>
+          <input type="radio" name="rfAspect" id="ra11" value="1:1"><label for="ra11">1:1<small>square</small></label>
+          <input type="radio" name="rfAspect" id="ra45" value="4:5"><label for="ra45">4:5<small>feed</small></label>
+        </div>
+        <div class="cap-body" id="rfBody" hidden>
+          <div class="group">
+            <div class="label">Framing</div>
+            <div class="seg" role="radiogroup" aria-label="Framing">
+              <input type="radio" name="rfFollow" id="rfFace" value="face" checked><label for="rfFace">Follow face<small>auto</small></label>
+              <input type="radio" name="rfFollow" id="rfFixed" value="fixed"><label for="rfFixed">Fixed<small>you choose</small></label>
+            </div>
+          </div>
+          <div class="group" id="rfPosGroup" hidden>
+            <div class="label"><span>Position</span><span class="val" id="rfPosVal">Centre</span></div>
+            <input type="range" id="rfPos" min="0" max="1" step="0.01" value="0.5" aria-label="Crop position">
+          </div>
+          <div class="progress" id="rfProgress" hidden>
+            <div class="track"><div class="fill" id="rfFill"></div></div>
+            <div class="stats"><span id="rfStatus">Finding faces…</span><span id="rfPct"></span></div>
+          </div>
+          <div class="note" id="rfNote" hidden></div>
+        </div>
+      </section>
 
       <section class="card cap-card" id="capCard" aria-label="Captions">
         <div class="cap-head">

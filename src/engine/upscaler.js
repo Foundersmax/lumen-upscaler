@@ -3,8 +3,8 @@
    GPU upscaler: Catmull-Rom with anti-ringing clamp, then contrast-adaptive sharpening
    ===================================================================== */
 const VS_FLIP = `#version 300 es
-in vec2 p; out vec2 uv;
-void main(){ uv = vec2(p.x*.5+.5, .5-p.y*.5); gl_Position = vec4(p,0.,1.); }`;
+in vec2 p; out vec2 uv; uniform vec4 crop; // crop: x, y, w, h in normalised source coords (y down)
+void main(){ uv = crop.xy + vec2(p.x*.5+.5, .5-p.y*.5) * crop.zw; gl_Position = vec4(p,0.,1.); }`;
 const VS = `#version 300 es
 in vec2 p; void main(){ gl_Position = vec4(p,0.,1.); }`;
 const FS_UP = `#version 300 es
@@ -40,6 +40,7 @@ void main(){
 
 /* Colour fix for untagged SD video: Chrome decodes it as BT.709, while players (VLC, mpv, ffmpeg)
    treat untagged SD as BT.601. M = RGB<-YCbCr(601) · YCbCr<-RGB(709), column-major for GLSL. */
+const FULL = [0, 0, 1, 1];
 export const IDENTITY = new Float32Array([1,0,0, 0,1,0, 0,0,1]);
 export const FIX_601 = (() => {
   const mul = (a, b) => a.map((r) => [0, 1, 2].map((j) => r[0] * b[0][j] + r[1] * b[1][j] + r[2] * b[2][j]));
@@ -75,7 +76,7 @@ export class Upscaler {
       gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE); gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE); return t; };
     this.srcTex = tex(gl.LINEAR); this.midTex = tex(gl.NEAREST);
     this.fbo = gl.createFramebuffer(); this.mw = 0; this.mh = 0;
-    this.uSize = gl.getUniformLocation(this.up, "size"); this.uCm = gl.getUniformLocation(this.up, "cm"); this.cm = IDENTITY; this.uSharp = gl.getUniformLocation(this.cas, "sharp");
+    this.uSize = gl.getUniformLocation(this.up, "size"); this.uCm = gl.getUniformLocation(this.up, "cm"); this.cm = IDENTITY; this.uCrop = gl.getUniformLocation(this.up, "crop"); this.uSharp = gl.getUniformLocation(this.cas, "sharp");
     gl.useProgram(this.up); gl.uniform1i(gl.getUniformLocation(this.up, "src"), 0);
     gl.useProgram(this.cas); gl.uniform1i(gl.getUniformLocation(this.cas, "src"), 0);
     gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, false); gl.pixelStorei(gl.UNPACK_PREMULTIPLY_ALPHA_WEBGL, false);
@@ -83,7 +84,8 @@ export class Upscaler {
   }
   get lost() { return this.gl.isContextLost(); }
   /** Upscales `source` (sw×sh) into this canvas at ow×oh. */
-  render(source, sw, sh, ow, oh, sharp) {
+  /** @param {number[]} [crop] [x, y, w, h] of the source to use, normalised (default: whole frame) */
+  render(source, sw, sh, ow, oh, sharp, crop = FULL) {
     const gl = this.gl;
     if (gl.isContextLost()) throw new Error("The graphics context was lost.");
     if (ow > this.maxSize || oh > this.maxSize) throw new Error(`Your GPU supports frames up to ${this.maxSize}px; ${ow}×${oh} is too large.`);
@@ -101,7 +103,7 @@ export class Upscaler {
     gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, source);
     gl.viewport(0, 0, ow, oh);
     gl.bindFramebuffer(gl.FRAMEBUFFER, this.fbo);
-    gl.useProgram(this.up); gl.uniform2f(this.uSize, sw, sh); gl.uniformMatrix3fv(this.uCm, false, this.cm);
+    gl.useProgram(this.up); gl.uniform2f(this.uSize, sw, sh); gl.uniformMatrix3fv(this.uCm, false, this.cm); gl.uniform4f(this.uCrop, crop[0], crop[1], crop[2], crop[3]);
     gl.drawArrays(gl.TRIANGLES, 0, 3);
     gl.bindFramebuffer(gl.FRAMEBUFFER, null);
     gl.bindTexture(gl.TEXTURE_2D, this.midTex);

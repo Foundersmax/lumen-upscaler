@@ -2,6 +2,7 @@
 import { Input, ALL_FORMATS, BlobSource } from "../../vendor/mediabunny.min.mjs";
 import { Doc, sanitizeWords, normWord, mapTime, cutAt, captionCues, toSRT, toText } from "./transcript.js";
 import { analyzeBase, analyzeChain, chainKey, gainsFor } from "./enhance.js";
+import { ASPECTS, DEFAULT_REFRAME, cropGeometry, reframeSize, cropShortSide, trackFaces, buildPath, centerAt, cropAt } from "./reframe.js";
 import { DEFAULT_AUDIO, NOISE_LEVELS, VOICE_TONES } from "../audio/dsp.js";
 import { CAPTION_STYLES, CAPTION_COLORS, DEFAULT_CAPTIONS, buildCues, mapCues, rangeMapper, drawCaptions, loadCaptionFonts } from "./captions.js";
 import { extractAudio16k, peaks as computePeaks, ASR_RATE } from "./audio.js";
@@ -20,6 +21,7 @@ const state = {
   find: { hits: [], len: 0, cur: -1 },
   captions: loadCaptionPrefs(), capCues: [],
   audioFx: loadAudioPrefs(), audioBase: null, chainLufs: {}, audioJob: null,
+  reframe: { ...DEFAULT_REFRAME }, faceSamples: null, rfPath: null, rfJob: null,
   transcribing: null, exporting: null, out: null, loadId: 0,
 };
 const busy = () => !!(state.transcribing || state.exporting);
@@ -113,7 +115,7 @@ async function loadFile(file) {
       file, key: projectKey(file), input, atrack: audioOk ? at : null, duration,
       srcW: vt.displayWidth, srcH: vt.displayHeight,
       colorFix: !cs?.matrix && Math.min(vt.codedWidth, vt.codedHeight) < 720,
-      doc: null, cuts: [], kept: [[0, duration]], peaks: null, audio: null, undo: [], redo: [], nowIdx: -1, captions: loadCaptionPrefs(), capCues: [], audioFx: loadAudioPrefs(), audioBase: null, chainLufs: {},
+      doc: null, cuts: [], kept: [[0, duration]], peaks: null, audio: null, undo: [], redo: [], nowIdx: -1, captions: loadCaptionPrefs(), capCues: [], audioFx: loadAudioPrefs(), audioBase: null, chainLufs: {}, reframe: { ...DEFAULT_REFRAME }, faceSamples: null, rfPath: null,
       url: URL.createObjectURL(file),
     });
     $("player").style.aspectRatio = `${state.srcW} / ${state.srcH}`;
@@ -126,12 +128,16 @@ async function loadFile(file) {
     $("exportOpen").disabled = false;
     updateResOptions();
 
-    state.audioJob?.abort(); state.audioJob = null;
+    state.audioJob?.abort(); state.audioJob = null; state.rfJob?.abort(); state.rfJob = null;
     const saved = await getProject(state.key);
     if (saved?.audioFx) state.audioFx = { ...DEFAULT_AUDIO, ...saved.audioFx };
     if (saved?.audioBase?.profile?.power) { state.audioBase = saved.audioBase; state.chainLufs = saved.chainLufs || {}; }
     syncAudioUI(); configurePreview();
     if (state.audioFx.on) ensureAudio().catch(() => {});
+    if (saved?.reframe) state.reframe = { ...DEFAULT_REFRAME, ...saved.reframe };
+    if (saved?.faceSamples) state.faceSamples = saved.faceSamples;
+    rebuildPath(); syncReframeUI(); applyFrame();
+    if (needsTracking()) ensureTracking().catch(() => {});
     if (saved?.doc?.words?.length && Math.abs(saved.doc.duration - duration) < 0.5) {
       state.doc = Doc.fromJSON(saved.doc);
       state.peaks = saved.peaks || null;
@@ -341,7 +347,7 @@ function afterEdit(persist = true) {
   if (persist && state.key) {
     clearTimeout(persistTimer);
     $("saved").textContent = "Saving…";
-    const key = state.key, snapshot = { doc: doc ? doc.toJSON() : null, peaks: state.peaks, captions: state.captions, audioFx: state.audioFx, audioBase: state.audioBase, chainLufs: state.chainLufs };
+    const key = state.key, snapshot = { doc: doc ? doc.toJSON() : null, peaks: state.peaks, captions: state.captions, audioFx: state.audioFx, audioBase: state.audioBase, chainLufs: state.chainLufs, reframe: state.reframe, faceSamples: state.faceSamples };
     persistTimer = setTimeout(async () => {
       const ok = await putProject(key, snapshot);
       $("saved").textContent = ok === null ? "Not saved in this browser" : "Saved";
@@ -550,11 +556,11 @@ function play() {
   video.play().catch(() => {});
 }
 function pause() { video.pause(); }
-function seek(t) { if (!state.file) return; video.currentTime = Math.max(0, Math.min(state.duration, t)); updateClock(); highlightNow(); drawStrip(); drawCapOverlay(); }
+function seek(t) { if (!state.file) return; video.currentTime = Math.max(0, Math.min(state.duration, t)); updateClock(); highlightNow(); drawStrip(); updateVideoCrop(); drawCapOverlay(); }
 $("playBtn").onclick = () => (video.paused ? play() : pause());
 video.addEventListener("play", () => { $("playIcon").innerHTML = PAUSE; $("playBtn").setAttribute("aria-label", "Pause"); loop(); });
 video.addEventListener("pause", () => { $("playIcon").innerHTML = PLAY; $("playBtn").setAttribute("aria-label", "Play"); });
-video.addEventListener("seeked", () => { updateClock(); highlightNow(); drawStrip(); drawCapOverlay(); });
+video.addEventListener("seeked", () => { updateClock(); highlightNow(); drawStrip(); updateVideoCrop(); drawCapOverlay(); });
 
 function loop() {
   if (video.paused) return;
@@ -563,7 +569,7 @@ function loop() {
     if (c[1] >= state.duration - 0.05) { video.pause(); video.currentTime = Math.max(0, c[0] - 0.01); }
     else video.currentTime = c[1];
   }
-  updateClock(); highlightNow(); drawStrip(); drawCapOverlay();
+  updateClock(); highlightNow(); drawStrip(); updateVideoCrop(); drawCapOverlay();
   requestAnimationFrame(loop);
 }
 
@@ -776,6 +782,86 @@ function captionOverlay() {
 }
 
 /* =====================================================================
+   Reframe (vertical / square, follows the face)
+   ===================================================================== */
+const needsTracking = () => !!state.file && state.reframe.aspect !== "orig" && state.reframe.follow === "face" && !state.faceSamples;
+function rebuildPath() {
+  state.rfPath = state.faceSamples && state.reframe.aspect !== "orig" ? buildPath(state.faceSamples, state.srcW, state.srcH, state.reframe.aspect) : null;
+}
+function setReframe(patch) {
+  Object.assign(state.reframe, patch);
+  rebuildPath(); syncReframeUI(); applyFrame(); updateResOptions(); updateExportInfo(); afterEdit();
+  if (needsTracking()) ensureTracking().catch(() => {});
+}
+for (const r of document.querySelectorAll('input[name="rfAspect"]')) r.addEventListener("change", () => setReframe({ aspect: r.value }));
+for (const r of document.querySelectorAll('input[name="rfFollow"]')) r.addEventListener("change", () => setReframe({ follow: r.value }));
+$("rfPos").addEventListener("input", () => { state.reframe.offset = +$("rfPos").value; paintPos(); updateVideoCrop(); drawCapOverlay(); });
+$("rfPos").addEventListener("change", () => setReframe({ offset: +$("rfPos").value }));
+function paintPos() {
+  const el = $("rfPos"), v = +el.value; el.style.setProperty("--p", v * 100 + "%");
+  const ax = cropGeometry(state.srcW || 16, state.srcH || 9, state.reframe.aspect).axis;
+  $("rfPosVal").textContent = Math.abs(v - 0.5) < 0.02 ? "Centre" : ax === "y" ? (v < 0.5 ? "Higher" : "Lower") : (v < 0.5 ? "Left" : "Right");
+}
+function syncReframeUI() {
+  const r = state.reframe;
+  for (const el of document.querySelectorAll('input[name="rfAspect"]')) { el.checked = el.value === r.aspect; el.disabled = !state.file || !!state.exporting; }
+  for (const el of document.querySelectorAll('input[name="rfFollow"]')) { el.checked = el.value === r.follow; el.disabled = !!state.exporting; }
+  $("rfBody").hidden = r.aspect === "orig";
+  $("rfPosGroup").hidden = r.follow !== "fixed";
+  $("rfPos").value = r.offset; paintPos();
+  const note = $("rfNote");
+  if (r.aspect !== "orig" && r.follow === "face" && state.rfPath) {
+    const cov = state.rfPath.coverage;
+    note.hidden = false;
+    note.textContent = cov >= 0.3 ? `Face found in ${Math.round(cov * 100)}% of the video. The frame follows it smoothly and cuts with the shots.`
+      : "Few faces were found, so the frame stays centred. Switch to Fixed to choose the framing yourself.";
+  } else note.hidden = true;
+  if (!state.file) $("rfSub").textContent = "Make vertical or square versions for Shorts, Reels and TikTok.";
+  else if (r.aspect === "orig") $("rfSub").textContent = "Make vertical or square versions for Shorts, Reels and TikTok.";
+  else { const [w, h] = reframeSize(state.srcW, state.srcH, r.aspect, "orig"); $("rfSub").textContent = `${r.aspect} crop of ${w}×${h} px from the ${state.srcW}×${state.srcH} source.`; }
+}
+/** Sizes the player to the chosen shape. */
+function applyFrame() {
+  const pl = $("player"), a = ASPECTS[state.reframe.aspect];
+  if (!state.file) return;
+  if (!a) { pl.classList.remove("reframed"); pl.style.aspectRatio = `${state.srcW} / ${state.srcH}`; pl.style.width = ""; video.style.objectPosition = ""; }
+  else { pl.classList.add("reframed"); pl.style.aspectRatio = String(a); pl.style.width = `min(100%, calc(62vh * ${a}))`; }
+  updateVideoCrop(); drawCapOverlay();
+}
+/** Pans the preview: with object-fit: cover, object-position selects the crop window. */
+function updateVideoCrop() {
+  if (!state.file || state.reframe.aspect === "orig") return;
+  const [x, y, w, h] = cropAt(state.reframe, state.rfPath, state.srcW, state.srcH, video.currentTime || 0);
+  const px = w < 1 ? (x / (1 - w)) * 100 : 50, py = h < 1 ? (y / (1 - h)) * 100 : 50;
+  video.style.objectPosition = `${px.toFixed(3)}% ${py.toFixed(3)}%`;
+}
+async function ensureTracking() {
+  if (!needsTracking()) return;
+  if (!state.rfJob) {
+    const ac = new AbortController(), key = state.key;
+    const job = { abort: () => ac.abort() };
+    job.promise = (async () => {
+      $("rfProgress").hidden = false;
+      try {
+        const samples = await trackFaces(state.inputTrack || (await state.input.getPrimaryVideoTrack()), state.duration, (p) => {
+          $("rfFill").style.width = (p * 100).toFixed(1) + "%"; $("rfStatus").textContent = "Finding faces…"; $("rfPct").textContent = Math.round(p * 100) + "%";
+        }, ac.signal);
+        if (state.key !== key) return;
+        state.faceSamples = samples; rebuildPath(); afterEdit();
+      } catch (e) {
+        if (e?.name !== "AbortError") { console.error(e); show("err", friendly(e)); setReframe({ follow: "fixed" }); }
+        throw e;
+      } finally {
+        if (state.rfJob === job) state.rfJob = null;
+        $("rfProgress").hidden = true; syncReframeUI(); updateVideoCrop(); drawCapOverlay();
+      }
+    })();
+    state.rfJob = job;
+  }
+  return state.rfJob.promise;
+}
+
+/* =====================================================================
    Studio voice (audio enhancement)
    ===================================================================== */
 function loadAudioPrefs() {
@@ -930,12 +1016,15 @@ dlg.addEventListener("click", (e) => { if (e.target === dlg) dlg.close(); }); //
 
 function outDims() {
   const res = val("res");
+  if (state.reframe.aspect !== "orig" && state.srcW) return reframeSize(state.srcW, state.srcH, state.reframe.aspect, res);
   if (res === "orig" || !state.srcW) return [even(state.srcW), even(state.srcH)];
   return targetSize(state.srcW, state.srcH, res).slice(0, 2);
 }
 function updateResOptions() {
   for (const r of document.querySelectorAll('input[name="res"]')) {
-    const shrinks = r.value !== "orig" && !!state.srcW && targetSize(state.srcW, state.srcH, r.value)[2] < 0.999;
+    const shrinks = r.value !== "orig" && !!state.srcW && (state.reframe.aspect !== "orig"
+      ? +r.value < cropShortSide(state.srcW, state.srcH, state.reframe.aspect) - 1
+      : targetSize(state.srcW, state.srcH, r.value)[2] < 0.999);
     r.disabled = !!state.exporting || shrinks;
     if (shrinks && r.checked) $("rOrig").checked = true;
   }
@@ -943,7 +1032,8 @@ function updateResOptions() {
 function updateExportInfo() {
   if (!state.file) { $("oDims").textContent = "—"; $("oLen").textContent = "—"; return; }
   const [w, h] = outDims();
-  $("oDims").textContent = `${w}×${h}` + (val("res") === "orig" ? "" : ` · upscaled`);
+  const shape = state.reframe.aspect !== "orig" ? ` · ${state.reframe.aspect}` : "";
+  $("oDims").textContent = `${w}×${h}${shape}` + (val("res") === "orig" ? "" : ` · upscaled`);
   const len = state.kept.reduce((s, [a, b]) => s + b - a, 0);
   $("oLen").textContent = fmtTime(len) + (len < state.duration - 0.05 ? ` (from ${fmtTime(state.duration)})` : "");
 }
@@ -970,6 +1060,9 @@ async function doExport() {
   const t0 = performance.now(), total = ranges.reduce((s, [a, b]) => s + b - a, 0);
   try {
     if (state.captions.on && state.capCues.length) await loadCaptionFonts();
+    if (needsTracking()) { $("xEta").textContent = "finding faces…"; await ensureTracking(); }
+    const rf = { ...state.reframe }, rfPath = state.rfPath, srcW = state.srcW, srcH = state.srcH;
+    const cropFn = rf.aspect !== "orig" ? (t) => cropAt(rf, rfPath, srcW, srcH, t) : null;
     let audioFx = null;
     if (state.audioFx.on && state.atrack) {
       $("xEta").textContent = "analyzing audio…";
@@ -977,7 +1070,7 @@ async function doExport() {
       audioFx = { settings: { ...state.audioFx }, profile: state.audioBase.profile, pre: g.pre, post: g.post };
     }
     const { blob, codec, audio, audioNote } = await exportEdit({
-      file: state.file, ranges, fmt, ow, oh, quality: QUALITY.high, sharp: upscale ? 0.5 : 0, colorFix: state.colorFix, signal: ac.signal, overlay: captionOverlay(), audioFx,
+      file: state.file, ranges, fmt, ow, oh, quality: QUALITY.high, sharp: upscale ? 0.5 : 0, colorFix: state.colorFix, signal: ac.signal, overlay: captionOverlay(), audioFx, cropAt: cropFn,
       onProgress: (p, { frames }) => {
         const el = (performance.now() - t0) / 1000;
         $("xFill").style.width = (p * 100).toFixed(1) + "%"; $("xPct").textContent = Math.floor(p * 100) + "%";
@@ -1015,7 +1108,7 @@ function setExporting(b) {
   $("exportOpen").classList.toggle("exporting", b);
   for (const el of document.querySelectorAll('input[name="fmt"]')) el.disabled = b;
   if (b) { $("xFill").style.width = "0"; $("xPct").textContent = "0%"; $("xFps").textContent = "0"; $("xEta").textContent = "starting…"; }
-  updateResOptions(); setToolsEnabled(); syncAudioUI(); syncCaptionUI();
+  updateResOptions(); setToolsEnabled(); syncAudioUI(); syncCaptionUI(); syncReframeUI();
 }
 
 $("saveBtn").onclick = async () => { if (!state.out) return; try { await saveBlob(state.out.blob, state.out.name); } catch (e) { show("xErr", e.message); } };
@@ -1030,7 +1123,7 @@ window.addEventListener("beforeunload", (e) => { if (busy()) { e.preventDefault(
    ===================================================================== */
 if (checkSupport()) {
   renderExample(); drawStrip(); setToolsEnabled();
-  buildCaptionUI(); syncCaptionUI(); drawStyleTiles();
+  buildCaptionUI(); syncCaptionUI(); drawStyleTiles(); syncReframeUI();
   loadCaptionFonts().then(() => { drawStyleTiles(); drawCapOverlay(); });
 }
 window.__edit = { state, loadFile, transcribe, doExport, undo, redo, applySelection, edit, runFind };
