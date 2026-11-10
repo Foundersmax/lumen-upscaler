@@ -17,7 +17,8 @@ const PKGS = [
   { name: "onnxruntime-web", version: "1.31.0-dev.20260914-8d85527a0", // the exact version transformers.js 4.3.1 depends on
     integrity: "sha512-Iy7rtadoBgxS/LLvDr3QW38DB1PNXRnr0GJMcL0TAt7c9qjgVQl83UlGCVyeAnK2InpmW8Uc3PL8XIuqtDeF6g==",
     files: { "dist/ort-wasm-simd-threaded.asyncify.mjs": "ort/ort-wasm-simd-threaded.asyncify.mjs",
-             "dist/ort-wasm-simd-threaded.asyncify.wasm": "ort/ort-wasm-simd-threaded.asyncify.wasm" } },
+             "dist/ort-wasm-simd-threaded.asyncify.wasm": "ort/ort-wasm-simd-threaded.asyncify.wasm",
+             "dist/ort.webgpu.min.mjs": "ort/ort.webgpu.min.mjs", "package.json": "ort/package.json" /* MIT */ } },
   { name: "@mediapipe/tasks-vision", version: "1.1.1",
     integrity: "sha512-jwntgT5tzDrKOkqg6xNDNpRcTUnGvmylZE5DFnzPXossiWOIDdZX+C81LI75hlXhsG58YZW+lGzcmjH1qrQE/Q==",
     files: { "vision_bundle.mjs": "mediapipe/vision_bundle.mjs", "package.json": "mediapipe/package.json", // Apache-2.0 (no LICENSE file in the package)

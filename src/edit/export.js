@@ -7,7 +7,7 @@ import {
 } from "../../vendor/mediabunny.min.mjs";
 import { Upscaler, IDENTITY, FIX_601 } from "../engine/upscaler.js";
 import { BlobSink } from "../engine/blobsink.js";
-import { encodableCodecs, friendly } from "../engine/media.js";
+import { encodableCodecs, friendly, videoBitrate } from "../engine/media.js";
 import { VoiceChain } from "../audio/dsp.js";
 import { toPlanar } from "./enhance.js";
 
@@ -75,7 +75,8 @@ async function attempt(o, { codec, hw }) {
     if (!vtrack) throw Object.assign(new Error("This file has no video track."), { fatal: true });
     const atrack = await input.getPrimaryAudioTrack();
 
-    const vsrc = new VideoSampleSource({ codec, quality: o.quality, hardwareAcceleration: hw, keyFrameInterval: 2 });
+    const fps = (await vtrack.computePacketStats(120).catch(() => null))?.averagePacketRate || 0;
+    const vsrc = new VideoSampleSource({ codec, bitrate: videoBitrate(codec, o.ow, o.oh, fps, o.qualityKey || "high"), hardwareAcceleration: hw, keyFrameInterval: 2 });
     output.addVideoTrack(vsrc);
 
     let asrc = null, audioCodec = null, audioNote = "";
@@ -95,7 +96,6 @@ async function attempt(o, { codec, hw }) {
     await output.start(); started = true;
 
     // Snap cut points to the source frame grid so the output keeps a constant frame rate.
-    const fps = (await vtrack.computePacketStats(120).catch(() => null))?.averagePacketRate || 0;
     const ranges = fps >= 10 && fps <= 121 ? snapRanges(o.ranges, fps) : o.ranges;
     if (!ranges.length) throw Object.assign(new Error("Nothing to export: every part of the video is cut."), { fatal: true });
     const total = ranges.reduce((s, [a, b]) => s + (b - a), 0);

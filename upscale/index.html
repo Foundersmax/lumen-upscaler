@@ -52,7 +52,7 @@
       </div>
       <div class="sample-note" id="sampleNote"><span>This is a sample frame. Drop a video anywhere to start.</span><button class="btn primary small" id="openBtn2" type="button">Choose file</button></div>
       <div class="drop" id="drop">Drop to load video</div>
-      <div class="loading" id="loading" hidden><div><div class="spin"></div>Reading video…</div></div>
+      <div class="loading" id="loading" hidden><div><div class="spin"></div><span id="loadingText">Reading video…</span></div></div>
       <input type="file" id="file" accept="video/*,.mkv,.mov,.webm,.mp4,.ts" hidden>
     </section>
 
@@ -67,7 +67,17 @@
       </div>
 
       <div class="group">
-        <div class="label"><span>Detail</span><span class="val" id="detailVal">60</span></div>
+        <div class="label">Engine</div>
+        <div class="seg" role="radiogroup" aria-label="Upscaling engine">
+          <input type="radio" name="eng" id="eFast" value="fast" checked><label for="eFast">Fast<small>GPU filter</small></label>
+          <input type="radio" name="eng" id="eDetail" value="detail"><label for="eDetail">AI Detail<small>keeps texture</small></label>
+          <input type="radio" name="eng" id="eClean" value="clean"><label for="eClean">AI Clean<small>removes noise</small></label>
+        </div>
+        <div class="note" id="aiInfo" hidden></div>
+      </div>
+
+      <div class="group">
+        <div class="label"><span id="detailLabel">Detail</span><span class="val" id="detailVal">60</span></div>
         <input type="range" id="detail" min="0" max="100" value="60" aria-label="Detail enhancement">
       </div>
 
@@ -111,7 +121,7 @@
       <div class="err" id="err" role="alert" hidden></div>
 
       <button class="btn primary" id="goBtn" type="button" disabled>Upscale video</button>
-      <div class="foot">Bicubic reconstruction with anti-ringing, then contrast-adaptive sharpening. Audio is kept as is.</div>
+      <div class="foot" id="foot">Bicubic reconstruction with anti-ringing, then contrast-adaptive sharpening. Audio is kept as is.</div>
     </aside>
   </main>
 </div>

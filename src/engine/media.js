@@ -6,6 +6,20 @@ export const RES_NAME = { 1080: "1080p", 1440: "2K", 2160: "4K" };
 export const QUALITY = { medium: QUALITY_MEDIUM, high: QUALITY_HIGH, veryhigh: QUALITY_VERY_HIGH };
 export const CODEC_NAMES = { avc: "H.264", hevc: "H.265", vp9: "VP9", av1: "AV1", vp8: "VP8", aac: "AAC", opus: "Opus", mp3: "MP3", flac: "FLAC", vorbis: "Vorbis" };
 export const CODECS = { mp4: ["avc", "hevc", "vp9", "av1"], webm: ["vp9", "av1", "vp8"] };
+
+/**
+ * Video bitrate from resolution and frame rate, in line with YouTube's upload recommendations
+ * (e.g. H.264 1080p30 ≈ 6 Mbps on High, 4K30 ≈ 37 Mbps on Max). Upscaled video is full of fine
+ * detail, and the encoder's automatic bitrates (which shrink with frame rate) were measured to
+ * smear it. Newer codecs need fewer bits for the same quality.
+ */
+const BITS_PER_PIXEL = { medium: 0.06, high: 0.1, veryhigh: 0.15 };
+const CODEC_EFFICIENCY = { avc: 1, hevc: 0.65, vp9: 0.7, av1: 0.55, vp8: 1.1 };
+export function videoBitrate(codec, w, h, fps, quality = "high") {
+  const f = Math.min(60, Math.max(24, fps || 30));
+  const bps = (BITS_PER_PIXEL[quality] ?? BITS_PER_PIXEL.high) * (CODEC_EFFICIENCY[codec] ?? 1) * w * h * f;
+  return Math.round(Math.min(120e6, Math.max(1e6, bps)));
+}
 export const fmtTime = (s) => { s = Math.max(0, s || 0); const h = Math.floor(s / 3600), m = Math.floor(s / 60) % 60, r = Math.floor(s % 60);
   return (h ? `${h}:${String(m).padStart(2, "0")}` : `${m}`) + `:${String(r).padStart(2, "0")}`; };
 export const fmtBytes = (b) => b >= 1e9 ? (b / 1e9).toFixed(2) + " GB" : b >= 1e6 ? (b / 1e6).toFixed(1) + " MB" : Math.max(1, Math.round(b / 1e3)) + " KB";

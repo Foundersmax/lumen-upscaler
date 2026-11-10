@@ -1,0 +1,16 @@
+{
+  "detail": {
+    "file": "esrgan-detail.onnx",
+    "denoise_strength": 0.75,
+    "layers": 34,
+    "sha256": "d7f83edd42be1cf1b1fc1c4e158ea1fe7cce9bf459f165a8deb9a8133f9c3f6c",
+    "bytes": 4858667
+  },
+  "clean": {
+    "file": "esrgan-clean.onnx",
+    "denoise_strength": 0.25,
+    "layers": 34,
+    "sha256": "10c8f7446d74ae399190bc669ba11ee933a4b6910f93a51939373ad3f32dbd2a",
+    "bytes": 4858666
+  }
+}

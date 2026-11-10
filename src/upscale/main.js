@@ -4,7 +4,8 @@ import {
 } from "../../vendor/mediabunny.min.mjs";
 import { Upscaler, IDENTITY, FIX_601 } from "../engine/upscaler.js";
 import { BlobSink } from "../engine/blobsink.js";
-import { RES_NAME, QUALITY, CODEC_NAMES, fmtTime, fmtBytes, store, targetSize, encodableCodecs as encodableCodecsFor, friendly, saveBlob } from "../engine/media.js";
+import { AIUpscaler, aiUpscaleFrame } from "../engine/ai-upscaler.js";
+import { RES_NAME, QUALITY, CODEC_NAMES, fmtTime, fmtBytes, store, targetSize, encodableCodecs as encodableCodecsFor, friendly, saveBlob, videoBitrate } from "../engine/media.js";
 
 const $ = (id) => document.getElementById(id);
 const val = (name) => document.querySelector(`input[name="${name}"]:checked`).value;
@@ -69,6 +70,8 @@ new ResizeObserver(layoutFrame).observe($("viewport"));
 
 let renderQueued = false;
 function renderPreview() {
+  if (engine() !== "fast") { scheduleAIPreview(); return; }
+  aiTicket++; showBusy(false);
   if (renderQueued) return; renderQueued = true;
   requestAnimationFrame(() => {
     renderQueued = false;
@@ -151,6 +154,70 @@ for (const r of document.querySelectorAll('input[type="range"]')) { paintRange(r
 $("detail").addEventListener("input", () => { $("detailVal").textContent = $("detail").value; store.set("detail", $("detail").value); renderPreview(); });
 
 /* =====================================================================
+   AI engine (Real-ESRGAN via WebGPU)
+   ===================================================================== */
+const engine = () => val("eng");
+const sharpness = () => ($("detail").value / 100) * (engine() === "fast" ? 1 : 0.35); // AI output is already crisp
+let aiLoad = null;
+function getAI(variant) {
+  if (state.ai?.variant === variant) return Promise.resolve(state.ai);
+  if (aiLoad?.variant === variant) return aiLoad.promise;
+  const promise = AIUpscaler.create(variant).then((ai) => { state.ai?.release(); state.ai = ai; aiLoad = null; return ai; }, (e) => { aiLoad = null; throw e; });
+  aiLoad = { variant, promise };
+  return promise;
+}
+function showBusy(on, text) { if (on) $("loadingText").textContent = text; $("loading").hidden = !on; }
+let aiTicket = 0, aiTimer = 0;
+const aiScratch = new OffscreenCanvas(1, 1);
+function scheduleAIPreview() { clearTimeout(aiTimer); aiTimer = setTimeout(renderAIPreview, 250); }
+async function renderAIPreview() {
+  const ticket = ++aiTicket, src = state.previewSrc;
+  if (!src || !preview || state.conversion) return;
+  const [ow, oh] = targetSize(state.srcW, state.srcH, val("res"));
+  try {
+    showBusy(true, state.ai?.variant === engine() ? "AI is enhancing this frame…" : "Loading the AI model…");
+    const ai = await getAI(engine());
+    if (ticket !== aiTicket) return;
+    showBusy(true, "AI is enhancing this frame…");
+    const cw = src.width, ch = src.height, k = Math.min(ow / cw, oh / ch);
+    const dw = k > 4 ? cw * 4 : ow, dh = k > 4 ? ch * 4 : oh;
+    if (aiScratch.width !== dw || aiScratch.height !== dh) { aiScratch.width = dw; aiScratch.height = dh; }
+    await ai.render(src, cw, ch, aiScratch);
+    if (ticket !== aiTicket || src !== state.previewSrc) return; // a newer request replaced this one
+    preview.cm = original.cm = state.colorFix ? FIX_601 : IDENTITY;
+    preview.render(aiScratch, dw, dh, ow, oh, sharpness());
+    original.render(src, cw, ch, cw, ch, 0);
+    updateAIInfo();
+  } catch (e) {
+    console.error(e);
+    if (ticket !== aiTicket) return;
+    showError(`${friendly(e)} Switched back to the Fast engine.`);
+    $("eFast").checked = true; store.set("eng", "fast"); syncEngineUI(); renderPreview();
+  } finally {
+    if (ticket === aiTicket) showBusy(false);
+  }
+}
+function updateAIInfo() {
+  const el = $("aiInfo"), ai = state.ai;
+  if (engine() === "fast" || !ai || ai.variant !== engine()) { el.hidden = true; return; }
+  const est = ai.estimate(state.srcW, state.srcH), frames = state.file && state.fps ? Math.round(state.fps * state.duration) : 0;
+  const where = ai.backend === "webgpu" ? "Runs on your GPU" : "WebGPU isn't available, so the AI runs on the CPU and is very slow";
+  el.hidden = false;
+  el.textContent = est == null ? `${where}.` : `${where}: about ${est < 10 ? est.toFixed(1) : Math.round(est)} s per frame` + (frames ? `, roughly ${fmtTime(est * frames)} for this video.` : ".");
+}
+function syncEngineUI() {
+  const e = engine();
+  $("detailLabel").textContent = e === "fast" ? "Detail" : "Extra sharpening";
+  $("foot").textContent = e === "fast" ? "Bicubic reconstruction with anti-ringing, then contrast-adaptive sharpening. Audio is kept as is."
+    : `Real-ESRGAN (compact video model) restores detail and ${e === "clean" ? "strongly removes noise and compression blocks" : "cleans compression while keeping texture"}. Audio is kept as is.`;
+  updateAIInfo();
+}
+{
+  const saved = store.get("eng"); const el = saved && document.querySelector(`input[name="eng"][value="${saved}"]`); if (el) el.checked = true;
+  for (const r of document.querySelectorAll('input[name="eng"]')) r.addEventListener("change", () => { store.set("eng", r.value); syncEngineUI(); renderPreview(); });
+}
+
+/* =====================================================================
    Loading files
    ===================================================================== */
 function showError(msg) { const el = $("err"); el.hidden = !msg; el.textContent = msg || ""; }
@@ -173,7 +240,7 @@ async function loadFile(file) {
   if (state.conversion) { showError("Finish or cancel the current export before opening another video."); return; }
   const id = ++state.loadId;
   showError(""); showNote("");
-  $("loading").hidden = false;
+  $("loadingText").textContent = "Reading video…"; $("loading").hidden = false;
   let input;
   try {
     input = new Input({ source: new BlobSource(file), formats: ALL_FORMATS });
@@ -242,8 +309,9 @@ function clearResult() {
 }
 
 /** One conversion attempt with a given codec + acceleration mode. */
-async function attempt({ codec, hw, fmt, quality, sharp, ow, oh, onFrame, onInit }) {
+async function attempt({ codec, hw, fmt, quality, sharp, ow, oh, onFrame, onInit, ai }) {
   const work = new Upscaler(new OffscreenCanvas(ow, oh));
+  const scratch = ai ? new OffscreenCanvas(1, 1) : null;
   work.cm = state.colorFix ? FIX_601 : IDENTITY;
   let rot = null; // 2D canvas used only when frames carry rotation
   const input = new Input({ source: new BlobSource(state.file), formats: ALL_FORMATS });
@@ -256,9 +324,9 @@ async function attempt({ codec, hw, fmt, quality, sharp, ow, oh, onFrame, onInit
     const conversion = await Conversion.init({
       input, output, showWarnings: false,
       video: {
-        codec, quality, hardwareAcceleration: hw, forceTranscode: true, allowTransformationMetadata: false,
+        codec, bitrate: videoBitrate(codec, ow, oh, state.fps, val("q")), hardwareAcceleration: hw, forceTranscode: true, allowTransformationMetadata: false,
         processedWidth: ow, processedHeight: oh,
-        process: (sample) => {
+        process: async (sample) => {
           let src = sample.toCanvasImageSource(), sw = src.displayWidth ?? src.width, sh = src.displayHeight ?? src.height;
           if (sample.rotation) { // bake rotation so the upscaler sees an upright frame
             const dw = sample.displayWidth, dh = sample.displayHeight;
@@ -266,7 +334,13 @@ async function attempt({ codec, hw, fmt, quality, sharp, ow, oh, onFrame, onInit
             const ctx = rot.getContext("2d"); ctx.clearRect(0, 0, dw, dh);
             sample.drawWithFit(ctx, { fit: "fill" }); src = rot; sw = dw; sh = dh;
           }
-          work.render(src, sw, sh, ow, oh, sharp);
+          if (ai) {
+            try { await aiUpscaleFrame(ai, work, src, sw, sh, ow, oh, sharp, scratch); }
+            catch (e) { // not an encoder problem: retrying with other encoders would fail the same way
+              throw Object.assign(new Error(`The AI upscaler stopped (${e?.message || e}). Try again, or use the Fast engine.`), { fatal: true });
+            }
+          }
+          else work.render(src, sw, sh, ow, oh, sharp);
           onFrame();
           return work.canvas;
         },
@@ -289,7 +363,13 @@ async function attempt({ codec, hw, fmt, quality, sharp, ow, oh, onFrame, onInit
 async function run() {
   if (!state.file || state.conversion) return;
   showError(""); showNote(""); clearResult();
-  const res = val("res"), fmt = val("fmt"), quality = QUALITY[val("q")], sharp = $("detail").value / 100;
+  const res = val("res"), fmt = val("fmt"), quality = QUALITY[val("q")], sharp = sharpness();
+  let ai = null;
+  if (engine() !== "fast") {
+    try { showBusy(true, "Loading the AI model…"); aiTicket++; ai = await getAI(engine()); }
+    catch (e) { showError(`${friendly(e)} Use the Fast engine instead.`); return; }
+    finally { showBusy(false); }
+  }
   const [ow, oh] = targetSize(state.srcW, state.srcH, res);
   const codecs = await encodableCodecs(ow, oh);
   if (!codecs.length) { showError(`Your browser can't encode ${ow}×${oh} video as ${fmt.toUpperCase()}. Try the other format or a lower resolution.`); return; }
@@ -307,7 +387,7 @@ async function run() {
     frames = 0; const tStart = performance.now();
     try {
       blob = await attempt({
-        ...step, fmt, quality, sharp, ow, oh,
+        ...step, fmt, quality, sharp, ow, oh, ai,
         onFrame: () => { frames++; },
         onInit: (c) => {
           conversion = c; state.conversion = c;
@@ -346,7 +426,7 @@ async function run() {
   state.outBlob = blob; state.outName = `${base}_${RES_NAME[res]}.${fmt}`;
   state.outUrl = URL.createObjectURL(blob);
   $("resultVideo").src = state.outUrl;
-  $("resultTitle").textContent = `${ow}×${oh} · ${CODEC_NAMES[used.codec]}`;
+  $("resultTitle").textContent = `${ow}×${oh} · ${CODEC_NAMES[used.codec]}` + (ai ? ` · AI ${ai.variant === "clean" ? "Clean" : "Detail"}` : "");
   $("resultSize").textContent = fmtBytes(blob.size);
   $("resultTime").textContent = `${fmtTime(secs)} · ${(frames / Math.max(secs, .001)).toFixed(1)} fps`;
   $("result").hidden = false;
@@ -379,6 +459,6 @@ $("saveBtn").addEventListener("click", async () => {
    ===================================================================== */
 if (checkSupport()) {
   state.previewSrc = sampleFrame();
-  layoutFrame(); updateOutputInfo(); renderPreview();
+  syncEngineUI(); layoutFrame(); updateOutputInfo(); renderPreview();
 }
 window.__app = { state, loadFile, run, BlobSink };

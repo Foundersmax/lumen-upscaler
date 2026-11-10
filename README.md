@@ -5,7 +5,10 @@
 Private, in-browser video tools. Everything runs on the user's device (WebCodecs, WebGL2, WebGPU/WASM); files never leave it.
 
 - **Edit** (`/edit/`): edit video by editing its transcript. On-device Whisper transcription with word timestamps, select words and press Delete to cut, one-click pause trimming and filler removal, undo/redo, playback that skips cuts, waveform timeline, export to MP4/WebM (optionally upscaled), captions (.srt) and transcript (.txt). Reframe to 9:16, 1:1 or 4:5 with on-device face tracking (MediaPipe BlazeFace full-range, CPU) and a camera-operator path: locked off when the speaker is still, smooth pans when they move, instant cuts on scene changes; live vertical preview and frame-accurate crop in export. Studio voice: on-device noise removal (noise profile learned from the file), a broadcast dynamic-mic voice tone (low cut, proximity warmth, presence lift, smooth top), de-esser, expander, compressor, and BS.1770 loudness normalisation to −14 / −16 LUFS with a −1 dBFS limiter; live preview through an AudioWorklet with hold-to-compare. Animated burned-in captions (6 styles: Highlight, Pop, Box, Clean, Reveal, One word; position, size, length, highlight colour) previewed live over the video. Transcription can be paused and continued later; double-click a word to fix its text; find in transcript with "cut all". Projects are saved in the browser and restored when the same file is reopened.
-- **Upscale** (`/upscale/`): upscale video to 1080p, 2K or 4K with a GPU pipeline (Catmull-Rom with anti-ringing + contrast-adaptive sharpening) and a before/after preview.
+- **Upscale** (`/upscale/`): upscale video to 1080p, 2K or 4K with a before/after preview. Two engines:
+  - **Fast**: GPU filter (Catmull-Rom with anti-ringing + contrast-adaptive sharpening), real time.
+  - **AI Detail / AI Clean**: Real-ESRGAN's compact video network (×4) on WebGPU via ONNX Runtime, CPU fallback. Restores edges and removes noise and compression blocks. Frames are processed in 384 px tiles with 16 px overlap (seam error ≈0.1/255), so memory is fixed at any size. Measured on photos degraded like web video (half size + x264 CRF 28, ×2 back): SSIM bicubic 0.752, Fast 0.751, AI 0.764. The model always sees the full-resolution frame; shrinking it first scored worse than bicubic.
+  - Exports use explicit bitrates in line with YouTube's upload guidance (e.g. 4K30 H.264 ≈ 37 Mbps on Max), so upscaled detail isn't lost in encoding.
 
 ## Develop
 No bundler or dependencies to install. Fetch the pinned third-party builds once, then serve the repo root:
@@ -22,6 +25,8 @@ No bundler or dependencies to install. Fetch the pinned third-party builds once,
     src/edit/                     Edit page: transcript model, audio extraction, Whisper worker, export, storage
     src/styles/app.css            design tokens + components (light and dark)
     scripts/vendor.mjs            fetches pinned third-party builds (sha512-verified) into vendor/ (generated, not committed)
+    scripts/convert-esrgan.py     builds models/*.onnx from the official Real-ESRGAN weights (see models/README.md)
+    models/                       AI upscaling models (Real-ESRGAN, BSD-3-Clause)
 
 ## Build and deploy
     node scripts/vendor.mjs && node build.mjs   # → dist/ (copies files, stamps ?v=<hash> on module URLs for cache busting)

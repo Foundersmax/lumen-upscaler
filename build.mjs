@@ -5,7 +5,7 @@ import { readFileSync, writeFileSync, mkdirSync, cpSync, rmSync, readdirSync, st
 import { join } from "node:path";
 import { createHash } from "node:crypto";
 
-const COPY = ["index.html", "404.html", "edit", "upscale", "src", "vendor", "favicon.svg", "public/_headers"];
+const COPY = ["index.html", "404.html", "edit", "upscale", "src", "vendor", "models", "favicon.svg", "public/_headers"];
 rmSync("dist", { recursive: true, force: true });
 mkdirSync("dist", { recursive: true });
 for (const p of COPY) cpSync(p, join("dist", p === "public/_headers" ? "_headers" : p), { recursive: true });
