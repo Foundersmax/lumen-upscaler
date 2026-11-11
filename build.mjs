@@ -16,8 +16,10 @@ const srcFiles = ["index.html", ...walk("edit"), ...walk("upscale"), ...walk("sr
 const v = createHash("sha256").update(srcFiles.map((f) => readFileSync(f)).join("")).digest("hex").slice(0, 10);
 for (const f of walk("dist").filter((f) => /\.(html|js)$/.test(f) && !f.includes(`${join("dist", "vendor")}`))) {
   const s = readFileSync(f, "utf8")
-    .replace(/((?:src|href)=")(\.{1,2}\/[^"?#]+\.(?:js|css))"/g, `$1$2?v=${v}"`)
-    .replace(/(from\s+"|import\(\s*"|new URL\(\s*")(\.{1,2}\/[^"?#]+\.js)"/g, `$1$2?v=${v}"`);
+    // vendored files are pinned and import each other by plain URL, so they are never stamped
+    // (a stamped and an unstamped URL would load the same library twice)
+    .replace(/((?:src|href)=")(\.{1,2}\/[^"?#]+\.(?:js|css))"/g, (m, pre, url) => (url.includes("/vendor/") ? m : `${pre}${url}?v=${v}"`))
+    .replace(/(from\s+"|import\(\s*"|new URL\(\s*")(\.{1,2}\/[^"?#]+\.js)"/g, (m, pre, url) => (url.includes("/vendor/") ? m : `${pre}${url}?v=${v}"`));
   writeFileSync(f, s);
 }
 console.log(`built dist/ (version ${v})`);

@@ -10,6 +10,14 @@ Private, in-browser video tools. Everything runs on the user's device (WebCodecs
   - **AI Detail / AI Clean**: Real-ESRGAN's compact video network (×4) on WebGPU via ONNX Runtime, CPU fallback. Restores edges and removes noise and compression blocks. Frames are processed in 384 px tiles with 16 px overlap (seam error ≈0.1/255), so memory is fixed at any size. Measured on photos degraded like web video (half size + x264 CRF 28, ×2 back): SSIM bicubic 0.752, Fast 0.751, AI 0.764. The model always sees the full-resolution frame; shrinking it first scored worse than bicubic.
   - Exports use explicit bitrates in line with YouTube's upload guidance (e.g. 4K30 H.264 ≈ 37 Mbps on Max), so upscaled detail isn't lost in encoding.
 
+## Accounts (optional)
+Sign-in uses Firebase Auth (email/password and Google) and is off until `src/auth/config.js` holds a Firebase web config; without it no sign-in button is shown and nothing contacts Google. Every tool works signed out. Setup:
+1. Firebase console → create a project → Build → Authentication → Get started → enable **Email/Password** and **Google**.
+2. Authentication → Settings → Authorized domains → add `wetnix.com`.
+3. Project settings → General → Your apps → add a **Web app** → paste its config object into `src/auth/config.js`.
+
+The SDK is vendored (no CDN), and the page CSP allows only Firebase's auth endpoints. Tests run against the Firebase Auth emulator.
+
 ## Develop
 No bundler or dependencies to install. Fetch the pinned third-party builds once, then serve the repo root:
 

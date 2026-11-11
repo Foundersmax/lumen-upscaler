@@ -22,6 +22,9 @@ const PKGS = [
   { name: "@mediabunny/aac-encoder", version: "1.62.1", // AAC-LC encoder (FFmpeg, WASM) for browsers without native AAC encoding
     integrity: "sha512-3fiZYAX95d+TDp2vu0sXMYputLm2+W21fZQMUWTf9awKhsRC/wko9OXj4GLLmGKMRryvI9Ocv9HzhhHVRYWopQ==",
     files: { "dist/bundles/mediabunny-aac-encoder.min.mjs": "mediabunny-aac-encoder.min.mjs", "LICENSE": "mediabunny-aac-encoder.LICENSE" } },
+  { name: "firebase", version: "13.1.0", // Auth only: sign-in / sign-up
+    integrity: "sha512-II/6P63vYzWdS6gTM9+OaMZD6XaCHJdI/9OVa8Z+bEs18t3CR2JlSwCI12KYMramNqTkywJocjSpGePaVPng+A==",
+    files: { "firebase-app.js": "firebase/firebase-app.js", "firebase-auth.js": "firebase/firebase-auth.js", "package.json": "firebase/package.json" /* Apache-2.0 */ } },
   { name: "@mediapipe/tasks-vision", version: "1.1.1",
     integrity: "sha512-jwntgT5tzDrKOkqg6xNDNpRcTUnGvmylZE5DFnzPXossiWOIDdZX+C81LI75hlXhsG58YZW+lGzcmjH1qrQE/Q==",
     files: { "vision_bundle.mjs": "mediapipe/vision_bundle.mjs", "package.json": "mediapipe/package.json", // Apache-2.0 (no LICENSE file in the package)
@@ -73,6 +76,14 @@ try {
     const src = readFileSync(aac, "utf8");
     if (src.includes('from"mediabunny"')) writeFileSync(aac, src.replaceAll('from"mediabunny"', 'from"./mediabunny.min.mjs"'));
     else if (!src.includes('from"./mediabunny.min.mjs"')) throw new Error("AAC encoder bundle no longer imports mediabunny as expected; review before upgrading.");
+  }
+
+  // Firebase's browser bundles import each other from Google's CDN; use our vendored copy instead.
+  const fbAuth = join(OUT, "firebase/firebase-auth.js");
+  if (existsSync(fbAuth)) {
+    const src = readFileSync(fbAuth, "utf8"), cdn = 'from"https://www.gstatic.com/firebasejs/13.1.0/firebase-app.js"';
+    if (src.includes(cdn)) writeFileSync(fbAuth, src.replaceAll(cdn, 'from"./firebase-app.js"'));
+    else if (!src.includes('from"./firebase-app.js"')) throw new Error("Firebase auth bundle no longer imports firebase-app as expected; review before upgrading.");
   }
 
   // Privacy patch: MediaPipe batches usage statistics and POSTs them to odml.pa.googleapis.com,
