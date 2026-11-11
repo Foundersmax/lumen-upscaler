@@ -7,7 +7,7 @@ import {
 } from "../../vendor/mediabunny.min.mjs";
 import { Upscaler, IDENTITY, FIX_601 } from "../engine/upscaler.js";
 import { BlobSink } from "../engine/blobsink.js";
-import { encodableCodecs, friendly, videoBitrate } from "../engine/media.js";
+import { encodableCodecs, friendly, videoBitrate, AUDIO_CODEC, ensureAacEncoder } from "../engine/media.js";
 import { VoiceChain } from "../audio/dsp.js";
 import { toPlanar } from "./enhance.js";
 
@@ -82,8 +82,11 @@ async function attempt(o, { codec, hw }) {
     let asrc = null, audioCodec = null, audioNote = "";
     if (atrack && (await atrack.canDecode())) {
       const nch = Math.min(2, atrack.numberOfChannels);
+      if (o.fmt === "mp4") await ensureAacEncoder();
+      // the container's universal codec first (AAC in MP4, Opus in WebM), then anything else that works
+      const wanted = [AUDIO_CODEC[o.fmt], ...format.getSupportedAudioCodecs().filter((c) => c !== AUDIO_CODEC[o.fmt])];
       for (const sampleRate of [atrack.sampleRate, 48000, 44100]) {
-        audioCodec = await getFirstEncodableAudioCodec(format.getSupportedAudioCodecs(), { numberOfChannels: nch, sampleRate });
+        audioCodec = await getFirstEncodableAudioCodec(wanted, { numberOfChannels: nch, sampleRate });
         if (audioCodec) {
           asrc = new AudioSampleSource({ codec: audioCodec, quality: o.quality, transform: { numberOfChannels: nch, sampleRate } });
           output.addAudioTrack(asrc);
@@ -91,6 +94,7 @@ async function attempt(o, { codec, hw }) {
         }
       }
       if (!asrc) audioNote = `This browser can't encode audio for ${o.fmt.toUpperCase()}, so the export is silent. Try the other format.`;
+      else if (o.fmt === "mp4" && audioCodec !== "aac") audioNote = `The sound was saved as ${audioCodec.toUpperCase()}, which some players (QuickTime, phones) can't play inside MP4. If you hear nothing there, export as WebM or play it in a browser.`;
     } else if (atrack) audioNote = "This browser can't decode the audio track, so the export is silent.";
 
     await output.start(); started = true;

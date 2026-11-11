@@ -19,6 +19,9 @@ const PKGS = [
     files: { "dist/ort-wasm-simd-threaded.asyncify.mjs": "ort/ort-wasm-simd-threaded.asyncify.mjs",
              "dist/ort-wasm-simd-threaded.asyncify.wasm": "ort/ort-wasm-simd-threaded.asyncify.wasm",
              "dist/ort.webgpu.min.mjs": "ort/ort.webgpu.min.mjs", "package.json": "ort/package.json" /* MIT */ } },
+  { name: "@mediabunny/aac-encoder", version: "1.62.1", // AAC-LC encoder (FFmpeg, WASM) for browsers without native AAC encoding
+    integrity: "sha512-3fiZYAX95d+TDp2vu0sXMYputLm2+W21fZQMUWTf9awKhsRC/wko9OXj4GLLmGKMRryvI9Ocv9HzhhHVRYWopQ==",
+    files: { "dist/bundles/mediabunny-aac-encoder.min.mjs": "mediabunny-aac-encoder.min.mjs", "LICENSE": "mediabunny-aac-encoder.LICENSE" } },
   { name: "@mediapipe/tasks-vision", version: "1.1.1",
     integrity: "sha512-jwntgT5tzDrKOkqg6xNDNpRcTUnGvmylZE5DFnzPXossiWOIDdZX+C81LI75hlXhsG58YZW+lGzcmjH1qrQE/Q==",
     files: { "vision_bundle.mjs": "mediapipe/vision_bundle.mjs", "package.json": "mediapipe/package.json", // Apache-2.0 (no LICENSE file in the package)
@@ -63,6 +66,15 @@ try {
     copyFileSync(dl, target);
     console.log(`↓ ${f.to} (verified)`);
   }
+  // The AAC encoder bundle imports the bare specifier "mediabunny"; point it at our vendored copy
+  // so both share one module instance (no bundler or import map needed).
+  const aac = join(OUT, "mediabunny-aac-encoder.min.mjs");
+  if (existsSync(aac)) {
+    const src = readFileSync(aac, "utf8");
+    if (src.includes('from"mediabunny"')) writeFileSync(aac, src.replaceAll('from"mediabunny"', 'from"./mediabunny.min.mjs"'));
+    else if (!src.includes('from"./mediabunny.min.mjs"')) throw new Error("AAC encoder bundle no longer imports mediabunny as expected; review before upgrading.");
+  }
+
   // Privacy patch: MediaPipe batches usage statistics and POSTs them to odml.pa.googleapis.com,
   // with no option to turn that off. Lumen promises nothing leaves the device, so make the
   // logger's flush discard its queue. Fails loudly if a different version changes the code.

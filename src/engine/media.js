@@ -1,5 +1,5 @@
 // Shared media helpers: presets, codecs, formatting, saving.
-import { canEncodeVideo, QUALITY_MEDIUM, QUALITY_HIGH, QUALITY_VERY_HIGH } from "../../vendor/mediabunny.min.mjs";
+import { canEncodeVideo, canEncodeAudio, QUALITY_MEDIUM, QUALITY_HIGH, QUALITY_VERY_HIGH } from "../../vendor/mediabunny.min.mjs";
 
 export const PRESETS = { 1080: [1920, 1080], 1440: [2560, 1440], 2160: [3840, 2160] };
 export const RES_NAME = { 1080: "1080p", 1440: "2K", 2160: "4K" };
@@ -51,6 +51,22 @@ export function friendly(err) {
   if (/context was lost/i.test(msg)) return "The GPU reset during processing. Close other GPU-heavy tabs and try again.";
   if (/unsupported|not supported|NotSupportedError/i.test(msg)) return "Your browser couldn't encode this video with the chosen settings. Try the other format or a lower resolution.";
   return msg;
+}
+
+/** Audio codec each container should carry so files play everywhere: Opus inside MP4 is silent in
+ *  QuickTime, Windows players and many phone apps, so MP4 always gets AAC. */
+export const AUDIO_CODEC = { mp4: "aac", webm: "opus" };
+
+/** Makes AAC encoding available: native WebCodecs where the browser has it, else the WASM encoder. */
+let aacReady = null;
+export function ensureAacEncoder() {
+  aacReady ||= (async () => {
+    if (await canEncodeAudio("aac").catch(() => false)) return "native";
+    const { registerAacEncoder } = await import("../../vendor/mediabunny-aac-encoder.min.mjs");
+    registerAacEncoder();
+    return "wasm";
+  })().catch((e) => { aacReady = null; console.warn("AAC encoder unavailable", e); return null; });
+  return aacReady;
 }
 
 /** Saves a Blob: via the Claude artifact downloads capability when embedded there, else a normal download. */

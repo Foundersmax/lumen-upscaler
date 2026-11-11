@@ -5,7 +5,7 @@ import {
 import { Upscaler, IDENTITY, FIX_601 } from "../engine/upscaler.js";
 import { BlobSink } from "../engine/blobsink.js";
 import { AIUpscaler, aiUpscaleFrame } from "../engine/ai-upscaler.js";
-import { RES_NAME, QUALITY, CODEC_NAMES, fmtTime, fmtBytes, store, targetSize, encodableCodecs as encodableCodecsFor, friendly, saveBlob, videoBitrate } from "../engine/media.js";
+import { RES_NAME, QUALITY, CODEC_NAMES, fmtTime, fmtBytes, store, targetSize, encodableCodecs as encodableCodecsFor, friendly, saveBlob, videoBitrate, AUDIO_CODEC, ensureAacEncoder } from "../engine/media.js";
 
 const $ = (id) => document.getElementById(id);
 const val = (name) => document.querySelector(`input[name="${name}"]:checked`).value;
@@ -321,8 +321,10 @@ async function attempt({ codec, hw, fmt, quality, sharp, ow, oh, onFrame, onInit
     target: new StreamTarget(sink.writable(), { chunked: true, chunkSize: 8 * 1024 * 1024 }),
   });
   try {
+    if (fmt === "mp4") await ensureAacEncoder();
     const conversion = await Conversion.init({
       input, output, showWarnings: false,
+      audio: { codec: AUDIO_CODEC[fmt] }, // copied as is when the source already uses it, converted otherwise
       video: {
         codec, bitrate: videoBitrate(codec, ow, oh, state.fps, val("q")), hardwareAcceleration: hw, forceTranscode: true, allowTransformationMetadata: false,
         processedWidth: ow, processedHeight: oh,
