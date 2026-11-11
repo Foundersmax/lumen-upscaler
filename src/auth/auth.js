@@ -1,73 +1,89 @@
-// Accounts via Firebase Auth. Optional: every tool works signed out. The SDK is loaded only when
-// a config exists, so visitors' browsers never contact Google unless sign-in is enabled.
-import { firebaseConfig } from "./config.js";
+// Accounts via Supabase Auth. Optional: every tool works signed out. The client library is loaded
+// only when a config exists, so visitors' browsers never contact Supabase unless sign-in is enabled.
+import { supabaseConfig } from "./config.js";
 
-// Test hook: { config, emulator } lets the suite run against the Firebase Auth emulator.
-const override = globalThis.__lumenFirebase || null;
-const config = override?.config || firebaseConfig;
-export const authEnabled = !!config;
+const config = globalThis.__lumenSupabase || supabaseConfig; // test hook: point at a local Supabase stack
+export const authEnabled = !!(config?.url && config?.anonKey);
+
+// What the email link brought back (read before the client consumes the URL fragment).
+const hash = new URLSearchParams(location.hash.slice(1));
+export const arrival = { type: hash.get("type"), error: hash.get("error_code") || hash.get("error"), description: hash.get("error_description") };
+
+/** Where email links and Google sign-in return to: this page, without query or fragment. */
+const here = () => location.origin + location.pathname;
 
 let ready = null;
 function load() {
-  ready ||= (async () => {
-    const [{ initializeApp }, A] = await Promise.all([import("../../vendor/firebase/firebase-app.js"), import("../../vendor/firebase/firebase-auth.js")]);
-    const auth = A.getAuth(initializeApp(config));
-    if (override?.emulator) A.connectAuthEmulator(auth, override.emulator, { disableWarnings: true });
-    return { auth, A };
-  })();
+  ready ||= new Promise((resolve, reject) => {
+    const s = document.createElement("script");
+    s.src = new URL("../../vendor/supabase/supabase.js", import.meta.url).href; // UMD build: defines window.supabase
+    s.onload = () => resolve(globalThis.supabase.createClient(config.url, config.anonKey, { auth: { persistSession: true, autoRefreshToken: true, detectSessionInUrl: true } }));
+    s.onerror = () => { ready = null; reject(new Error("Couldn't load the sign-in library.")); };
+    document.head.append(s);
+  });
   return ready;
 }
 
-/** Calls back with the user (or null) now and on every change. Returns an unsubscribe function. */
+const view = (u) => u && ({ id: u.id, email: u.email, name: u.user_metadata?.name || u.user_metadata?.full_name || "", verified: !!(u.email_confirmed_at || u.confirmed_at),
+  password: (u.app_metadata?.providers || [u.app_metadata?.provider]).includes("email") });
+const check = ({ data, error }) => { if (error) throw error; return data; };
+
+/** Calls back with (user | null, event) now and on every change. */
 export async function onUser(cb) {
-  if (!authEnabled) { cb(null); return () => {}; }
-  const { auth, A } = await load();
-  return A.onAuthStateChanged(auth, (u) => cb(u ? view(u) : null));
+  if (!authEnabled) { cb(null, "INITIAL_SESSION"); return; }
+  const sb = await load();
+  sb.auth.onAuthStateChange((event, session) => cb(view(session?.user) || null, event));
 }
-const view = (u) => ({ uid: u.uid, email: u.email, name: u.displayName || "", verified: u.emailVerified, photo: u.photoURL || "",
-  password: u.providerData.some((p) => p.providerId === "password") });
 
+/** @returns {{user, needsConfirm: boolean}} needsConfirm: a confirmation link was emailed and must be opened first */
 export async function signUp(email, password, name) {
-  const { auth, A } = await load();
-  const cred = await A.createUserWithEmailAndPassword(auth, email, password);
-  if (name) await A.updateProfile(cred.user, { displayName: name });
-  await A.sendEmailVerification(cred.user).catch((e) => console.warn("verification email not sent", e));
-  return view(auth.currentUser);
+  const sb = await load();
+  const data = check(await sb.auth.signUp({ email, password, options: { data: name ? { name } : {}, emailRedirectTo: here() } }));
+  // For an address that is already registered Supabase returns a decoy user with no identities.
+  if (data.user && Array.isArray(data.user.identities) && data.user.identities.length === 0) throw Object.assign(new Error("exists"), { code: "user_already_exists" });
+  return { user: view(data.user), needsConfirm: !data.session };
 }
-export async function signIn(email, password) {
-  const { auth, A } = await load();
-  return view((await A.signInWithEmailAndPassword(auth, email, password)).user);
+export async function signIn(email, password) { const sb = await load(); return view(check(await sb.auth.signInWithPassword({ email, password })).user); }
+/** Leaves the page for Google, then returns here signed in. */
+export async function signInWithGoogle() { const sb = await load(); check(await sb.auth.signInWithOAuth({ provider: "google", options: { redirectTo: here() } })); }
+export async function sendReset(email) { const sb = await load(); check(await sb.auth.resetPasswordForEmail(email, { redirectTo: here() })); }
+export async function resendConfirmation(email) { const sb = await load(); check(await sb.auth.resend({ type: "signup", email, options: { emailRedirectTo: here() } })); }
+export async function setPassword(password) { const sb = await load(); return view(check(await sb.auth.updateUser({ password })).user); }
+export async function signOutUser() { const sb = await load(); const { error } = await sb.auth.signOut(); if (error) throw error; }
+/** Needs the SQL in supabase/delete_account.sql to have been run once in the project. */
+export async function deleteAccount() {
+  const sb = await load();
+  const { error } = await sb.rpc("delete_account");
+  if (error) throw error;
+  await sb.auth.signOut({ scope: "local" }).catch(() => {});
 }
-export async function signInWithGoogle() {
-  const { auth, A } = await load();
-  return view((await A.signInWithPopup(auth, new A.GoogleAuthProvider())).user);
-}
-export async function sendReset(email) { const { auth, A } = await load(); await A.sendPasswordResetEmail(auth, email); }
-export async function resendVerification() { const { auth, A } = await load(); if (auth.currentUser) await A.sendEmailVerification(auth.currentUser); }
-export async function refreshUser() { const { auth } = await load(); await auth.currentUser?.reload(); return auth.currentUser ? view(auth.currentUser) : null; }
-export async function signOutUser() { const { auth, A } = await load(); await A.signOut(auth); }
-export async function deleteAccount() { const { auth, A } = await load(); if (auth.currentUser) await A.deleteUser(auth.currentUser); }
 
-/** Plain-language message for a Firebase Auth error; null means "say nothing" (the person cancelled). */
+/** Plain-language message for an auth error. */
 export function authMessage(e) {
-  const code = e?.code || "";
+  const code = e?.code || "", text = String(e?.message || "");
   const map = {
-    "auth/invalid-credential": "The email or password is incorrect.",
-    "auth/wrong-password": "The email or password is incorrect.",
-    "auth/user-not-found": "The email or password is incorrect.",
-    "auth/invalid-email": "That doesn't look like an email address.",
-    "auth/missing-password": "Enter your password.",
-    "auth/email-already-in-use": "An account with this email already exists. Sign in instead.",
-    "auth/weak-password": "Choose a longer password (at least 8 characters).",
-    "auth/too-many-requests": "Too many attempts. Wait a few minutes, then try again.",
-    "auth/network-request-failed": "Couldn't reach the sign-in service. Check your connection and try again.",
-    "auth/user-disabled": "This account has been disabled.",
-    "auth/popup-blocked": "Your browser blocked the Google sign-in window. Allow pop-ups for this site and try again.",
-    "auth/requires-recent-login": "For security, sign out, sign in again, then retry.",
-    "auth/operation-not-allowed": "This sign-in method isn't switched on for this site yet.",
-    "auth/unauthorized-domain": "This site's address isn't authorised for sign-in yet.",
-    "auth/account-exists-with-different-credential": "An account with this email already exists with a different sign-in method.",
+    invalid_credentials: "The email or password is incorrect.",
+    email_not_confirmed: "Confirm your email first: open the link we sent you.",
+    user_already_exists: "An account with this email already exists. Sign in instead.",
+    email_exists: "An account with this email already exists. Sign in instead.",
+    weak_password: "Choose a longer password (at least 8 characters).",
+    same_password: "Choose a password you haven't used here before.",
+    email_address_invalid: "That doesn't look like an email address.",
+    validation_failed: "That doesn't look like an email address.",
+    over_email_send_rate_limit: "Too many emails were requested. Wait a few minutes, then try again.",
+    over_request_rate_limit: "Too many attempts. Wait a few minutes, then try again.",
+    signup_disabled: "New sign-ups are closed at the moment.",
+    email_provider_disabled: "Email sign-in isn't switched on for this site yet.",
+    provider_disabled: "This sign-in method isn't switched on for this site yet.",
+    user_banned: "This account has been disabled.",
+    otp_expired: "That link has expired or was already used. Request a new one.",
+    access_denied: "That link has expired or was already used. Request a new one.",
+    session_not_found: "Your session ended. Sign in again.",
+    PGRST202: "Account deletion isn't set up for this site yet.",
   };
-  if (code === "auth/popup-closed-by-user" || code === "auth/cancelled-popup-request") return null;
-  return map[code] || "Something went wrong signing in. Try again.";
+  if (map[code]) return map[code];
+  if (/failed to fetch|networkerror|load failed/i.test(text) || e?.name === "AuthRetryableFetchError") return "Couldn't reach the sign-in service. Check your connection and try again.";
+  if (/invalid login credentials/i.test(text)) return map.invalid_credentials;
+  if (/rate limit/i.test(text)) return map.over_request_rate_limit;
+  return "Something went wrong. Try again.";
 }

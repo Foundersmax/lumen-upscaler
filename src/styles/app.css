@@ -420,3 +420,4 @@ dialog.sheet::backdrop { background: rgb(8 10 14 / .5); backdrop-filter: blur(3p
 .linkbtn.danger, .btn.danger { color: var(--danger); }
 .btn { white-space: nowrap; }
 @media (max-width: 520px) { .head-actions a.btn { display: none; } } /* the hero repeats this call to action */
+.auth-lead { margin: 0; line-height: 1.6; overflow-wrap: anywhere; }

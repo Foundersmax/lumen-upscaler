@@ -11,12 +11,14 @@ Private, in-browser video tools. Everything runs on the user's device (WebCodecs
   - Exports use explicit bitrates in line with YouTube's upload guidance (e.g. 4K30 H.264 ≈ 37 Mbps on Max), so upscaled detail isn't lost in encoding.
 
 ## Accounts (optional)
-Sign-in uses Firebase Auth (email/password and Google) and is off until `src/auth/config.js` holds a Firebase web config; without it no sign-in button is shown and nothing contacts Google. Every tool works signed out. Setup:
-1. Firebase console → create a project → Build → Authentication → Get started → enable **Email/Password** and **Google**.
-2. Authentication → Settings → Authorized domains → add `wetnix.com`.
-3. Project settings → General → Your apps → add a **Web app** → paste its config object into `src/auth/config.js`.
+Sign-in uses Supabase Auth (email/password, Google) and is off until `src/auth/config.js` holds a project URL and anon key; without it no sign-in button is shown and nothing contacts Supabase. Every tool works signed out. Setup:
+1. supabase.com → New project. Project Settings → API → copy the **Project URL** and **anon (publishable) key** into `src/auth/config.js`.
+2. Authentication → URL Configuration → **Site URL** `https://wetnix.com`, **Redirect URLs** `https://wetnix.com/**`.
+3. Authentication → Emails → SMTP Settings → enable custom SMTP (e.g. Brevo). The built-in sender is rate-limited and for testing only.
+4. Optional: Authentication → Providers → Google (needs a Google OAuth client).
+5. Optional: run `supabase/delete_account.sql` in the SQL Editor to enable "Delete account".
 
-The SDK is vendored (no CDN), and the page CSP allows only Firebase's auth endpoints. Tests run against the Firebase Auth emulator.
+The client library is vendored (no CDN), and the page CSP allows only `*.supabase.co`. Tests run against Supabase's real auth server (GoTrue) and PostgREST in Docker, with a mail catcher for confirmation and reset links.
 
 ## Develop
 No bundler or dependencies to install. Fetch the pinned third-party builds once, then serve the repo root:
