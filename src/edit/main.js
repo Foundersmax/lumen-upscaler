@@ -99,7 +99,7 @@ async function loadFile(file) {
     input = new Input({ source: new BlobSource(file), formats: ALL_FORMATS });
     let vt;
     try { vt = await input.getPrimaryVideoTrack(); }
-    catch { throw new Error(`"${file.name}" isn't a video format Lumen can read. MP4, MOV, WebM, MKV and MPEG-TS work.`); }
+    catch { throw new Error(`"${file.name}" isn't a video format Wetnix can read. MP4, MOV, WebM, MKV and MPEG-TS work.`); }
     if (!vt) throw new Error(`"${file.name}" has no video track.`);
     if (!(await vt.canDecode())) throw new Error("This browser can't decode this video's codec. Try Chrome or Edge, or convert it to H.264.");
     const at = await input.getPrimaryAudioTrack();
@@ -147,7 +147,7 @@ async function loadFile(file) {
       show("note", "Restored your transcript and edits for this file.");
     } else {
       $("setup").hidden = !audioOk;
-      scriptMessage(audioOk ? "" : "This video has no audio Lumen can read, so it can't be transcribed. You can still export or upscale it.");
+      scriptMessage(audioOk ? "" : "This video has no audio Wetnix can read, so it can't be transcribed. You can still export or upscale it.");
       afterEdit(false);
     }
   } catch (err) {
@@ -893,7 +893,7 @@ function syncAudioUI() {
   set("audTone", a.tone); set("audNoise", a.noise); set("audLoud", a.loudness);
   $("xAudStyle").textContent = `· ${VOICE_TONES[a.tone]?.name}${a.loudness !== "off" ? `, ${a.loudness.replace("-", "−")} LUFS` : ""}`;
   if (!state.file) $("audSub").textContent = "Remove background noise and get a close-mic podcast sound.";
-  else if (!ok) $("audSub").textContent = "This video has no audio Lumen can read.";
+  else if (!ok) $("audSub").textContent = "This video has no audio Wetnix can read.";
   else $("audSub").textContent = a.on ? "Playback and export use the enhanced sound." : "Remove background noise and get a close-mic podcast sound.";
   const ready = audioReady();
   $("audCompare").disabled = !ready || !previewGraph;

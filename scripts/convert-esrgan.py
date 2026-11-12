@@ -1,4 +1,4 @@
-"""Builds Lumen's AI upscaling models (ONNX) from the official Real-ESRGAN release weights.
+"""Builds Wetnix's AI upscaling models (ONNX) from the official Real-ESRGAN release weights.
 
 Model: SRVGGNetCompact "realesr-general-x4v3" (Xintao Wang et al., BSD-3-Clause), the compact
 network Real-ESRGAN uses for real-world video. Like Real-ESRGAN's own `--denoise_strength`, the

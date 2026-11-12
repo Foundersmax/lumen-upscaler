@@ -1,4 +1,4 @@
-# Lumen
+# Wetnix
 
 **Live:** https://wetnix.com · editor https://wetnix.com/edit/ · upscaler https://wetnix.com/upscale/
 

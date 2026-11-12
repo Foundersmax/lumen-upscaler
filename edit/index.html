@@ -5,14 +5,14 @@
 <!-- Enforced in the page itself because GitHub Pages can't send security headers: only this site, the speech-model host and (for optional sign-in) the Supabase account service may be contacted. -->
 <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' 'wasm-unsafe-eval'; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src https://fonts.gstatic.com; img-src 'self' data: blob:; media-src 'self' blob:; worker-src 'self' blob:; connect-src 'self' blob: data: https://huggingface.co https://*.huggingface.co https://*.hf.co https://*.supabase.co; object-src 'none'; base-uri 'self'">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
-<title>Lumen Editor</title>
+<title>Wetnix Editor</title>
 <meta name="description" content="Edit video by editing its transcript. On-device transcription, one-click pause and filler removal, private: files never leave your device.">
 <meta name="theme-color" content="#0d0f13" media="(prefers-color-scheme: dark)">
 <meta name="theme-color" content="#f3f4f7" media="(prefers-color-scheme: light)">
 <link rel="canonical" href="https://wetnix.com/edit/">
 <meta property="og:url" content="https://wetnix.com/edit/">
 <meta property="og:type" content="website">
-<meta property="og:title" content="Lumen Editor">
+<meta property="og:title" content="Wetnix Editor">
 <meta property="og:description" content="Edit video by editing its transcript, privately in your browser.">
 <link rel="icon" href="../favicon.svg" type="image/svg+xml">
 <link rel="preconnect" href="https://fonts.googleapis.com">
@@ -23,7 +23,7 @@
 <body>
 <div class="app">
   <header>
-    <a class="brand" href="../"><span class="mark" aria-hidden="true"></span>Lumen</a>
+    <a class="brand" href="../"><span class="mark" aria-hidden="true"></span>Wetnix</a>
     <nav class="tabs" aria-label="Tools">
       <a href="./" aria-current="page">Edit</a>
       <a href="../upscale/">Upscale</a>
@@ -317,7 +317,7 @@
 <div class="seltool" id="seltool" hidden>
   <button type="button" id="selCut">Cut</button><button type="button" id="selRestore">Restore</button><button type="button" id="selPlay">Play</button>
 </div>
-<noscript><p style="padding:16px">Lumen needs JavaScript enabled.</p></noscript>
+<noscript><p style="padding:16px">Wetnix needs JavaScript enabled.</p></noscript>
 <script type="module" src="../src/edit/main.js"></script>
 <script type="module" src="../src/auth/ui.js"></script>
 </body>

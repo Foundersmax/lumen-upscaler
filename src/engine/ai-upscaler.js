@@ -4,7 +4,7 @@
 // destination at the requested size.
 //
 // Measured on photos degraded like web video (half size + x264 CRF 28), upscaled back ×2:
-//   bicubic SSIM 0.752 · Lumen fast filter 0.751 · AI Detail 0.764 · AI Clean 0.763 (PSNR +0.16 dB)
+//   bicubic SSIM 0.752 · Wetnix fast filter 0.751 · AI Detail 0.764 · AI Clean 0.763 (PSNR +0.16 dB)
 // Feeding the model a pre-shrunk frame scored worse than bicubic, so it always sees full resolution.
 import * as ort from "../../vendor/ort/ort.webgpu.min.mjs";
 

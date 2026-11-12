@@ -79,7 +79,7 @@ try {
   }
 
   // Privacy patch: MediaPipe batches usage statistics and POSTs them to odml.pa.googleapis.com,
-  // with no option to turn that off. Lumen promises nothing leaves the device, so make the
+  // with no option to turn that off. Wetnix promises nothing leaves the device, so make the
   // logger's flush discard its queue. Fails loudly if a different version changes the code.
   const mp = join(OUT, "mediapipe/vision_bundle.mjs");
   if (existsSync(mp)) {
