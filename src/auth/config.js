@@ -1,16 +1,15 @@
-// Supabase project settings. Copy both values from
-//   Supabase dashboard → Project Settings → API  (Project URL and the "anon" / "publishable" key)
-// They are meant to be public (they ship to every visitor); access is controlled by Supabase's
-// auth settings and row-level security, not by hiding them. Never put the service_role key here.
+// Firebase web app config. Paste the object from
+//   Firebase console → Project settings → General → Your apps → Web app → SDK setup and configuration
+// These values identify the project and are meant to be public (they ship to every visitor);
+// access is controlled by Firebase Auth's settings and authorised domains, not by hiding them.
 //
 // While this is null, the sign-in button isn't shown and the site works exactly as before.
-export const supabaseConfig = {
-  url: "https://sdpfdysvetkshucubfyx.supabase.co",
-  anonKey: "sb_publishable_fPEMQd_G-8zWp2ymUeHYog_DD96S0n5", // publishable key: safe to ship
-};
+export const firebaseConfig = null;
 /* Example:
-export const supabaseConfig = {
-  url: "https://abcdefghijklmnop.supabase.co",
-  anonKey: "eyJhbGciOi…",
+export const firebaseConfig = {
+  apiKey: "AIza…",
+  authDomain: "your-project.firebaseapp.com",
+  projectId: "your-project",
+  appId: "1:1234567890:web:abcdef",
 };
 */
