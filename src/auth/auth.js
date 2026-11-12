@@ -61,6 +61,10 @@ export async function deleteAccount() {
 /** Plain-language message for an auth error. */
 export function authMessage(e) {
   const code = e?.code || "", text = String(e?.message || "");
+  // Supabase uses one code for two different limits: a per-address cool-down and a project-wide cap.
+  const wait = text.match(/after (\d+) seconds?/i);
+  if (wait) return `For security, wait ${wait[1]} seconds before asking for another email.`;
+  if (code === "over_email_send_rate_limit" || /email rate limit/i.test(text)) return "We can't send more emails right now (the site's hourly email limit was reached). Try again later.";
   const map = {
     invalid_credentials: "The email or password is incorrect.",
     email_not_confirmed: "Confirm your email first: open the link we sent you.",
