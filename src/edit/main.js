@@ -4,6 +4,7 @@ import { Doc, sanitizeWords, normWord, mapTime, cutAt, captionCues, toSRT, toTex
 import { analyzeBase, analyzeChain, chainKey, gainsFor } from "./enhance.js";
 import { ASPECTS, DEFAULT_REFRAME, cropGeometry, reframeSize, cropShortSide, trackFaces, buildPath, centerAt, cropAt } from "./reframe.js";
 import { DEFAULT_AUDIO, NOISE_LEVELS, VOICE_TONES } from "../audio/dsp.js";
+import { sentences, aiScenes, pauseScenes, buildScenes, sceneRanges, slug, DEFAULT_MODEL, AIError } from "./scenes.js";
 import { CAPTION_STYLES, CAPTION_COLORS, DEFAULT_CAPTIONS, buildCues, mapCues, rangeMapper, drawCaptions, loadCaptionFonts } from "./captions.js";
 import { extractAudio16k, peaks as computePeaks, ASR_RATE } from "./audio.js";
 import { exportEdit, ExportCancelled } from "./export.js";
@@ -22,6 +23,7 @@ const state = {
   captions: loadCaptionPrefs(), capCues: [],
   audioFx: loadAudioPrefs(), audioBase: null, chainLufs: {}, audioJob: null,
   reframe: { ...DEFAULT_REFRAME }, faceSamples: null, rfPath: null, rfJob: null,
+  scenes: [], sceneJob: null, playUntil: 0,
   transcribing: null, exporting: null, out: null, loadId: 0,
 };
 const busy = () => !!(state.transcribing || state.exporting);
@@ -115,7 +117,7 @@ async function loadFile(file) {
       file, key: projectKey(file), input, atrack: audioOk ? at : null, duration,
       srcW: vt.displayWidth, srcH: vt.displayHeight,
       colorFix: !cs?.matrix && Math.min(vt.codedWidth, vt.codedHeight) < 720,
-      doc: null, cuts: [], kept: [[0, duration]], peaks: null, audio: null, undo: [], redo: [], nowIdx: -1, captions: loadCaptionPrefs(), capCues: [], audioFx: loadAudioPrefs(), audioBase: null, chainLufs: {}, reframe: { ...DEFAULT_REFRAME }, faceSamples: null, rfPath: null,
+      doc: null, cuts: [], kept: [[0, duration]], peaks: null, audio: null, undo: [], redo: [], nowIdx: -1, captions: loadCaptionPrefs(), capCues: [], audioFx: loadAudioPrefs(), audioBase: null, chainLufs: {}, reframe: { ...DEFAULT_REFRAME }, faceSamples: null, rfPath: null, scenes: [],
       url: URL.createObjectURL(file),
     });
     $("player").style.aspectRatio = `${state.srcW} / ${state.srcH}`;
@@ -136,6 +138,8 @@ async function loadFile(file) {
     if (state.audioFx.on) ensureAudio().catch(() => {});
     if (saved?.reframe) state.reframe = { ...DEFAULT_REFRAME, ...saved.reframe };
     if (saved?.faceSamples) state.faceSamples = saved.faceSamples;
+    if (Array.isArray(saved?.scenes)) state.scenes = saved.scenes;
+    renderScenes();
     rebuildPath(); syncReframeUI(); applyFrame();
     if (needsTracking()) ensureTracking().catch(() => {});
     if (saved?.doc?.words?.length && Math.abs(saved.doc.duration - duration) < 0.5) {
@@ -347,7 +351,7 @@ function afterEdit(persist = true) {
   if (persist && state.key) {
     clearTimeout(persistTimer);
     $("saved").textContent = "Saving…";
-    const key = state.key, snapshot = { doc: doc ? doc.toJSON() : null, peaks: state.peaks, captions: state.captions, audioFx: state.audioFx, audioBase: state.audioBase, chainLufs: state.chainLufs, reframe: state.reframe, faceSamples: state.faceSamples };
+    const key = state.key, snapshot = { doc: doc ? doc.toJSON() : null, peaks: state.peaks, captions: state.captions, audioFx: state.audioFx, audioBase: state.audioBase, chainLufs: state.chainLufs, reframe: state.reframe, faceSamples: state.faceSamples, scenes: state.scenes };
     persistTimer = setTimeout(async () => {
       const ok = await putProject(key, snapshot);
       $("saved").textContent = ok === null ? "Not saved in this browser" : "Saved";
@@ -366,6 +370,7 @@ function updateStats() {
 function setToolsEnabled() {
   const has = !!state.doc && !busy();
   for (const id of ["trimBtn", "pauseLen", "fillerBtn", "restoreBtn", "findBtn"]) $(id).disabled = !has;
+  $("scenesBtn").disabled = !state.doc?.n || !!state.transcribing;
   $("undoBtn").disabled = !has || !state.undo.length;
   $("redoBtn").disabled = !has || !state.redo.length;
   $("srtBtn").disabled = $("txtBtn").disabled = !state.doc?.n;
@@ -559,11 +564,12 @@ function pause() { video.pause(); }
 function seek(t) { if (!state.file) return; video.currentTime = Math.max(0, Math.min(state.duration, t)); updateClock(); highlightNow(); drawStrip(); updateVideoCrop(); drawCapOverlay(); }
 $("playBtn").onclick = () => (video.paused ? play() : pause());
 video.addEventListener("play", () => { $("playIcon").innerHTML = PAUSE; $("playBtn").setAttribute("aria-label", "Pause"); loop(); });
-video.addEventListener("pause", () => { $("playIcon").innerHTML = PLAY; $("playBtn").setAttribute("aria-label", "Play"); });
+video.addEventListener("pause", () => { state.playUntil = 0; $("playIcon").innerHTML = PLAY; $("playBtn").setAttribute("aria-label", "Play"); });
 video.addEventListener("seeked", () => { updateClock(); highlightNow(); drawStrip(); updateVideoCrop(); drawCapOverlay(); });
 
 function loop() {
   if (video.paused) return;
+  if (state.playUntil && video.currentTime >= state.playUntil - 0.03) { video.pause(); return; } // end of a scene preview
   const c = cutAt(video.currentTime, state.cuts, 0.03);
   if (c) {
     if (c[1] >= state.duration - 0.05) { video.pause(); video.currentTime = Math.max(0, c[0] - 0.01); }
@@ -776,7 +782,9 @@ function captionOverlay() {
   if (!state.captions.on || !state.capCues.length) return null;
   const opts = { ...state.captions }, cues = state.capCues;
   return (ranges) => {
-    const timed = mapCues(cues, rangeMapper(ranges));
+    // only captions inside the exported span (a scene exports part of the video)
+    const lo = ranges[0]?.[0] ?? 0, hi = ranges.at(-1)?.[1] ?? Infinity;
+    const timed = mapCues(cues.filter((c) => c.s >= lo - 0.05 && c.e <= hi + 0.05), rangeMapper(ranges));
     return (ctx, t, w, h) => drawCaptions(ctx, w, h, t, timed, opts);
   };
 }
@@ -984,6 +992,138 @@ video.addEventListener("play", () => { if (audioCtx && audioCtx.state === "suspe
 }
 
 /* =====================================================================
+   Scenes: split into separate videos
+   ===================================================================== */
+const scDlg = $("scenesDlg");
+$("scenesBtn").onclick = () => { if (!state.doc?.n) return; pause(); syncScenesUI(); scDlg.showModal(); };
+$("scenesClose").onclick = () => scDlg.close();
+scDlg.addEventListener("click", (e) => { if (e.target === scDlg) scDlg.close(); });
+$("openaiKey").value = store.get("openaiKey", "");
+$("openaiModel").value = store.get("openaiModel", DEFAULT_MODEL);
+$("openaiKey").addEventListener("change", () => store.set("openaiKey", $("openaiKey").value.trim()));
+$("openaiModel").addEventListener("change", () => store.set("openaiModel", $("openaiModel").value.trim() || DEFAULT_MODEL));
+$("openaiForget").onclick = () => { $("openaiKey").value = ""; try { localStorage.removeItem("lumen.openaiKey"); } catch {} show("scNote", "Your OpenAI key was removed from this browser."); };
+{ const saved = store.get("scCount"); const el = saved && document.querySelector(`input[name="scCount"][value="${saved}"]`); if (el) el.checked = true; }
+for (const r of document.querySelectorAll('input[name="scCount"]')) r.addEventListener("change", () => store.set("scCount", r.value));
+
+function setSceneProgress(text, p = null, right = "") {
+  $("scProgress").hidden = !text;
+  if (!text) return;
+  $("scStatus").textContent = text; $("scRight").textContent = right;
+  $("scFill").style.width = p == null ? "30%" : (p * 100).toFixed(1) + "%";
+  $("scFill").classList.toggle("indeterminate", p == null);
+}
+function syncScenesUI() {
+  const has = state.scenes.length > 0, job = !!state.sceneJob, exporting = !!state.exporting;
+  $("scenesSetup").hidden = has;
+  $("sceneActions").hidden = !has; $("scenesFoot").hidden = !has;
+  $("scenesLead").textContent = has ? `${state.scenes.length} scenes. Rename them here; the titles become the file names.` : "Split this video into self-contained parts and export each one as its own video.";
+  $("aiScenesBtn").disabled = $("pauseScenesBtn").disabled = job || exporting;
+  $("redoScenes").disabled = job || exporting;
+  $("exportAllScenes").textContent = state.sceneExport ? "Cancel" : `Export all ${state.scenes.length} scenes`;
+  $("exportAllScenes").classList.toggle("primary", !state.sceneExport); $("exportAllScenes").classList.toggle("ghost", !!state.sceneExport);
+  $("exportAllScenes").disabled = !state.sceneExport && (job || exporting);
+  for (const b of $("sceneList").querySelectorAll(".scene-export")) b.disabled = job || exporting;
+}
+
+async function findScenes(useAI) {
+  if (!state.doc?.n || state.sceneJob) return;
+  show("scErr", ""); show("scNote", "");
+  const sents = sentences(state.doc);
+  if (!sents.length) { show("scErr", "Everything is cut, so there's nothing to split."); return; }
+  const count = val("scCount"), duration = state.duration;
+  if (!useAI) {
+    state.scenes = buildScenes(sents, pauseScenes(sents, duration, count), duration);
+    afterScenes(`Split into ${state.scenes.length} parts at natural pauses.`);
+    return;
+  }
+  const key = $("openaiKey").value.trim();
+  if (!key) { $("aiSettings").open = true; $("openaiKey").focus(); show("scErr", "Add your OpenAI API key first (it stays in this browser)."); return; }
+  store.set("openaiKey", key);
+  const ac = new AbortController(); state.sceneJob = ac; syncScenesUI();
+  setSceneProgress("Asking OpenAI to find the scenes…");
+  try {
+    const picks = await aiScenes({ key, model: $("openaiModel").value.trim() || DEFAULT_MODEL, sents, duration, count, signal: ac.signal, url: globalThis.__wetnixOpenAIUrl });
+    state.scenes = buildScenes(sents, picks, duration);
+    afterScenes(`Found ${state.scenes.length} scenes.`);
+  } catch (e) {
+    if (e?.name !== "AbortError") { console.error(e); show("scErr", e instanceof AIError ? e.message : friendly(e)); }
+  } finally {
+    state.sceneJob = null; setSceneProgress(""); syncScenesUI();
+  }
+}
+function afterScenes(note) { renderScenes(); show("scNote", note); afterEdit(); }
+$("aiScenesBtn").onclick = () => findScenes(true);
+$("pauseScenesBtn").onclick = () => findScenes(false);
+$("redoScenes").onclick = () => { state.scenes = []; renderScenes(); show("scNote", ""); show("scErr", ""); afterEdit(); };
+
+function renderScenes() {
+  const list = $("sceneList"); list.textContent = "";
+  state.scenes.forEach((sc, i) => {
+    const li = document.createElement("li"); li.className = "scene"; li.dataset.i = i;
+    const head = document.createElement("div"); head.className = "scene-head";
+    const n = document.createElement("span"); n.className = "scene-n"; n.textContent = i + 1;
+    const title = document.createElement("input"); title.className = "scene-title"; title.value = sc.title; title.maxLength = 80; title.setAttribute("aria-label", `Title of scene ${i + 1}`);
+    title.addEventListener("change", () => { sc.title = title.value.trim() || `Part ${i + 1}`; title.value = sc.title; afterEdit(); });
+    const chip = document.createElement("span"); chip.className = "chip";
+    const kept = sceneRanges(state.kept, sc).reduce((s, [a, b]) => s + b - a, 0);
+    chip.textContent = `${fmtTime(sc.start)}–${fmtTime(sc.end)} · ${fmtTime(kept)}`;
+    head.append(n, title, chip);
+    li.append(head);
+    if (sc.summary) { const p = document.createElement("p"); p.className = "scene-sum"; p.textContent = sc.summary; li.append(p); }
+    const btns = document.createElement("div"); btns.className = "scene-btns";
+    const playB = document.createElement("button"); playB.type = "button"; playB.className = "tool scene-play"; playB.textContent = "Play";
+    playB.onclick = () => { scDlg.close(); seek(sc.start); state.followUntil = 0; play(); state.playUntil = sc.end; };
+    const expB = document.createElement("button"); expB.type = "button"; expB.className = "tool scene-export"; expB.textContent = "Export";
+    expB.onclick = () => exportScenes([i]);
+    btns.append(playB, expB); li.append(btns);
+    list.append(li);
+  });
+  syncScenesUI();
+}
+
+$("exportAllScenes").onclick = () => state.sceneExport ? state.exporting?.abort() : exportScenes(state.scenes.map((_, i) => i));
+
+async function exportScenes(indices) {
+  if (!state.file || busy() || !indices.length) return;
+  show("scErr", ""); show("scNote", ""); pause();
+  const ac = new AbortController(); state.exporting = ac; state.sceneExport = true;
+  setExporting(true); syncScenesUI();
+  const wake = await navigator.wakeLock?.request("screen").catch(() => null);
+  let done = 0, skipped = 0;
+  try {
+    for (let k = 0; k < indices.length; k++) {
+      const i = indices[k], sc = state.scenes[i];
+      for (const li of $("sceneList").children) li.classList.toggle("active", +li.dataset.i === i);
+      const ranges = sceneRanges(state.kept, sc);
+      if (!ranges.length) { skipped++; continue; }
+      const label = indices.length > 1 ? `Exporting scene ${i + 1} (${k + 1} of ${indices.length})` : `Exporting scene ${i + 1}`;
+      setSceneProgress(label, 0, "starting…");
+      const t0 = performance.now();
+      const r = await renderEdit(ranges, ac.signal, (p, { status }) => {
+        if (status) { setSceneProgress(label, 0, status); return; }
+        const el = (performance.now() - t0) / 1000;
+        setSceneProgress(label, p, p > 0.02 ? `${fmtTime(el / p - el)} left` : `${Math.floor(p * 100)}%`);
+        $("exportOpen").textContent = `Scene ${k + 1}/${indices.length} · ${Math.floor(p * 100)}%`;
+      });
+      const name = `${fileBase()}_${String(i + 1).padStart(2, "0")}_${slug(sc.title)}.${r.fmt}`;
+      await saveBlob(r.blob, name);
+      done++;
+      if (r.audioNote) show("scErr", r.audioNote);
+    }
+    show("scNote", `Exported ${done} scene${done === 1 ? "" : "s"}.` + (skipped ? ` ${skipped} skipped because everything in ${skipped === 1 ? "it is" : "them is"} cut.` : ""));
+  } catch (e) {
+    if (e instanceof ExportCancelled) show("scNote", `Export cancelled${done ? ` after ${done} scene${done === 1 ? "" : "s"}` : ""}.`);
+    else { console.error(e); show("scErr", friendly(e)); }
+  } finally {
+    wake?.release?.().catch(() => {});
+    for (const li of $("sceneList").children) li.classList.remove("active");
+    state.exporting = null; state.sceneExport = false; setSceneProgress("");
+    setExporting(false); $("exportOpen").textContent = "Export"; syncScenesUI();
+  }
+}
+
+/* =====================================================================
    Keyboard
    ===================================================================== */
 window.addEventListener("keydown", (e) => {
@@ -1048,47 +1188,54 @@ function clearResult() {
 
 $("exportBtn").addEventListener("click", () => state.exporting ? state.exporting.abort() : doExport());
 
+/**
+ * Renders the given source ranges with every current setting (size, format, captions, reframe,
+ * Studio voice). Shared by Export and scene export. Caller owns state.exporting.
+ */
+async function renderEdit(ranges, signal, onProgress) {
+  const [ow, oh] = outDims(), fmt = val("fmt"), res = val("res"), upscale = res !== "orig";
+  if (state.captions.on && state.capCues.length) await loadCaptionFonts();
+  if (needsTracking()) { onProgress?.(0, { frames: 0, status: "finding faces…" }); await ensureTracking(); }
+  const rf = { ...state.reframe }, rfPath = state.rfPath, srcW = state.srcW, srcH = state.srcH;
+  const cropFn = rf.aspect !== "orig" ? (t) => cropAt(rf, rfPath, srcW, srcH, t) : null;
+  let audioFx = null;
+  if (state.audioFx.on && state.atrack) {
+    onProgress?.(0, { frames: 0, status: "analyzing audio…" });
+    const g = await ensureAudio(signal);
+    audioFx = { settings: { ...state.audioFx }, profile: state.audioBase.profile, pre: g.pre, post: g.post };
+  }
+  const out = await exportEdit({ file: state.file, ranges, fmt, ow, oh, quality: QUALITY.high, sharp: upscale ? 0.5 : 0, colorFix: state.colorFix, signal, overlay: captionOverlay(), audioFx, cropAt: cropFn, onProgress });
+  return { ...out, ow, oh, fmt, res, upscale, total: ranges.reduce((s, [a, b]) => s + b - a, 0) };
+}
+const fileBase = () => state.file.name.replace(/\.[^.]+$/, "").replace(/[\\/:*?"<>|]+/g, "_").slice(0, 120) || "video";
+
 async function doExport() {
   if (!state.file || busy()) return;
   const ranges = state.kept;
   if (!ranges.length) { show("xErr", "Everything is cut. Restore some words to export."); return; }
   show("xErr", ""); show("xNote", ""); clearResult(); pause();
   const ac = new AbortController(); state.exporting = ac;
-  const [ow, oh] = outDims(), fmt = val("fmt"), res = val("res"), upscale = res !== "orig";
   setExporting(true);
   const wake = await navigator.wakeLock?.request("screen").catch(() => null);
-  const t0 = performance.now(), total = ranges.reduce((s, [a, b]) => s + b - a, 0);
+  const t0 = performance.now();
   try {
-    if (state.captions.on && state.capCues.length) await loadCaptionFonts();
-    if (needsTracking()) { $("xEta").textContent = "finding faces…"; await ensureTracking(); }
-    const rf = { ...state.reframe }, rfPath = state.rfPath, srcW = state.srcW, srcH = state.srcH;
-    const cropFn = rf.aspect !== "orig" ? (t) => cropAt(rf, rfPath, srcW, srcH, t) : null;
-    let audioFx = null;
-    if (state.audioFx.on && state.atrack) {
-      $("xEta").textContent = "analyzing audio…";
-      const g = await ensureAudio(ac.signal);
-      audioFx = { settings: { ...state.audioFx }, profile: state.audioBase.profile, pre: g.pre, post: g.post };
-    }
-    const { blob, codec, audio, audioNote } = await exportEdit({
-      file: state.file, ranges, fmt, ow, oh, quality: QUALITY.high, sharp: upscale ? 0.5 : 0, colorFix: state.colorFix, signal: ac.signal, overlay: captionOverlay(), audioFx, cropAt: cropFn,
-      onProgress: (p, { frames }) => {
-        const el = (performance.now() - t0) / 1000;
-        $("xFill").style.width = (p * 100).toFixed(1) + "%"; $("xPct").textContent = Math.floor(p * 100) + "%";
-        $("xFps").textContent = (frames / Math.max(el, 0.001)).toFixed(1);
-        $("xEta").textContent = p > 0.02 ? `${fmtTime(el / p - el)} left` : "starting…";
-        $("exportOpen").textContent = `Exporting ${Math.floor(p * 100)}%`;
-      },
+    const r = await renderEdit(ranges, ac.signal, (p, { frames, status }) => {
+      if (status) { $("xEta").textContent = status; return; }
+      const el = (performance.now() - t0) / 1000;
+      $("xFill").style.width = (p * 100).toFixed(1) + "%"; $("xPct").textContent = Math.floor(p * 100) + "%";
+      $("xFps").textContent = (frames / Math.max(el, 0.001)).toFixed(1);
+      $("xEta").textContent = p > 0.02 ? `${fmtTime(el / p - el)} left` : "starting…";
+      $("exportOpen").textContent = `Exporting ${Math.floor(p * 100)}%`;
     });
     const secs = (performance.now() - t0) / 1000;
-    const base = state.file.name.replace(/\.[^.]+$/, "").replace(/[\\/:*?"<>|]+/g, "_").slice(0, 120) || "video";
-    const url = URL.createObjectURL(blob);
-    state.out = { blob, url, name: `${base}_edited${upscale ? "_" + RES_NAME[res] : ""}.${fmt}` };
+    const url = URL.createObjectURL(r.blob);
+    state.out = { blob: r.blob, url, name: `${fileBase()}_edited${r.upscale ? "_" + RES_NAME[r.res] : ""}.${r.fmt}` };
     $("resultVideo").src = url;
-    $("resultTitle").textContent = `${ow}×${oh} · ${CODEC_NAMES[codec] || codec}${audio ? " + " + (CODEC_NAMES[audio] || audio) : ""} · ${fmtTime(total)}`;
-    $("resultSize").textContent = fmtBytes(blob.size);
+    $("resultTitle").textContent = `${r.ow}×${r.oh} · ${CODEC_NAMES[r.codec] || r.codec}${r.audio ? " + " + (CODEC_NAMES[r.audio] || r.audio) : ""} · ${fmtTime(r.total)}`;
+    $("resultSize").textContent = fmtBytes(r.blob.size);
     $("resultTime").textContent = `made in ${fmtTime(secs)}`;
     $("result").hidden = false;
-    if (audioNote) show("xNote", audioNote);
+    if (r.audioNote) show("xNote", r.audioNote);
     if (!dlg.open) dlg.showModal();
     $("exportOpen").textContent = "Export ready";
   } catch (e) {

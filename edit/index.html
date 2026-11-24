@@ -2,8 +2,8 @@
 <html lang="en">
 <head>
 <meta charset="utf-8">
-<!-- Enforced in the page itself because GitHub Pages can't send security headers: only this site, the speech-model host and (for optional sign-in) Google's account service may be contacted. -->
-<meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' 'wasm-unsafe-eval' https://apis.google.com; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src https://fonts.gstatic.com; img-src 'self' data: blob:; media-src 'self' blob:; worker-src 'self' blob:; connect-src 'self' blob: data: https://huggingface.co https://*.huggingface.co https://*.hf.co https://identitytoolkit.googleapis.com https://securetoken.googleapis.com; frame-src https://*.firebaseapp.com; object-src 'none'; base-uri 'self'">
+<!-- Enforced in the page itself because GitHub Pages can't send security headers: only this site, the speech-model host and (for optional sign-in) Google's account service and (for AI scene detection, with the user's own key) OpenAI may be contacted. -->
+<meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' 'wasm-unsafe-eval' https://apis.google.com; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src https://fonts.gstatic.com; img-src 'self' data: blob:; media-src 'self' blob:; worker-src 'self' blob:; connect-src 'self' blob: data: https://huggingface.co https://*.huggingface.co https://*.hf.co https://identitytoolkit.googleapis.com https://securetoken.googleapis.com https://api.openai.com; frame-src https://*.firebaseapp.com; object-src 'none'; base-uri 'self'">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <title>Wetnix Editor</title>
 <meta name="description" content="Edit video by editing its transcript. On-device transcription, one-click pause and filler removal, private: files never leave your device.">
@@ -211,6 +211,8 @@
           <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M3 8h10"/><path d="M4 4.5h8M5 11.5h6" opacity=".5"/></svg>Fillers</button>
         <button class="tool" id="findBtn" type="button" disabled aria-pressed="false" title="Find (Ctrl+F)">
           <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5"><circle cx="7" cy="7" r="4.5"/><path d="m10.5 10.5 3 3"/></svg>Find</button>
+        <button class="tool" id="scenesBtn" type="button" disabled title="Split into separate videos">
+          <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5"><rect x="1.5" y="3" width="5.5" height="10" rx="1"/><rect x="9" y="3" width="5.5" height="10" rx="1"/></svg>Scenes</button>
         <span class="spacer"></span>
         <span class="saved" id="saved" aria-live="polite"></span>
         <button class="tool" id="undoBtn" type="button" disabled aria-label="Undo" title="Undo (Ctrl+Z)"><svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M5.5 3.5 2.5 6.5l3 3"/><path d="M2.5 6.5h7a4 4 0 0 1 0 8H7"/></svg></button>
@@ -311,6 +313,53 @@
       <button class="btn ghost" id="srtBtn" type="button" disabled>Captions .srt</button>
       <button class="btn ghost" id="txtBtn" type="button" disabled>Transcript .txt</button>
     </div>
+  </div>
+</dialog>
+
+<dialog class="sheet scenes-sheet" id="scenesDlg" aria-labelledby="scenesTitle">
+  <div class="sheet-head">
+    <h2 id="scenesTitle">Scenes</h2>
+    <button class="xbtn" id="scenesClose" type="button" aria-label="Close"><svg viewBox="0 0 14 14" fill="none" stroke="currentColor" stroke-width="1.6"><path d="m3 3 8 8M11 3l-8 8"/></svg></button>
+  </div>
+  <div class="sheet-body">
+    <p class="help" id="scenesLead">Split this video into self-contained parts and export each one as its own video.</p>
+    <div class="scenes-setup" id="scenesSetup">
+      <div class="group">
+        <div class="label">How many scenes</div>
+        <div class="seg" role="radiogroup" aria-label="Number of scenes">
+          <input type="radio" name="scCount" id="scAuto" value="auto" checked><label for="scAuto">Auto<small>4–6</small></label>
+          <input type="radio" name="scCount" id="sc3" value="3"><label for="sc3">3</label>
+          <input type="radio" name="scCount" id="sc5" value="5"><label for="sc5">5</label>
+          <input type="radio" name="scCount" id="sc8" value="8"><label for="sc8">8</label>
+        </div>
+      </div>
+      <div class="actions">
+        <button class="btn primary" id="aiScenesBtn" type="button">Find scenes with AI</button>
+        <button class="btn ghost" id="pauseScenesBtn" type="button">Split at pauses</button>
+      </div>
+      <p class="help"><b>Find scenes with AI</b> sends the transcript text (not the video) to OpenAI using your own API key, and picks breaks where the topic changes. <b>Split at pauses</b> runs on this device and makes roughly equal parts.</p>
+      <details class="ai-settings" id="aiSettings">
+        <summary>OpenAI settings</summary>
+        <div class="ai-fields">
+          <label class="field" for="openaiKey"><span>API key</span><input id="openaiKey" type="password" autocomplete="off" spellcheck="false" placeholder="sk-…"></label>
+          <label class="field" for="openaiModel"><span>Model</span><input id="openaiModel" type="text" autocomplete="off" spellcheck="false"></label>
+          <p class="help">Create a key at platform.openai.com → API keys. It's stored only in this browser and sent only to OpenAI. Each request costs a fraction of a cent for a 1-hour video on the default model.</p>
+          <button class="linkbtn danger" id="openaiForget" type="button">Forget key</button>
+        </div>
+      </details>
+    </div>
+    <div class="progress" id="scProgress" hidden>
+      <div class="track"><div class="fill" id="scFill"></div></div>
+      <div class="stats"><span id="scStatus">Working…</span><span id="scRight"></span></div>
+    </div>
+    <div class="note" id="scNote" hidden></div>
+    <div class="err" id="scErr" role="alert" hidden></div>
+    <ol class="scene-list" id="sceneList"></ol>
+    <div class="actions" id="sceneActions" hidden>
+      <button class="btn primary" id="exportAllScenes" type="button">Export all scenes</button>
+      <button class="btn ghost" id="redoScenes" type="button">Start over</button>
+    </div>
+    <p class="help" id="scenesFoot" hidden>Each scene uses the size and format from Export, plus your cuts, captions, reframe and Studio voice. Your browser may ask once to allow several downloads.</p>
   </div>
 </dialog>
 

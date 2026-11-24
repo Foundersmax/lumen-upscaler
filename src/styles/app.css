@@ -421,3 +421,29 @@ dialog.sheet::backdrop { background: rgb(8 10 14 / .5); backdrop-filter: blur(3p
 .btn { white-space: nowrap; }
 @media (max-width: 520px) { .head-actions a.btn { display: none; } } /* the hero repeats this call to action */
 .auth-lead { margin: 0; line-height: 1.6; overflow-wrap: anywhere; }
+
+/* ---------- scenes ---------- */
+.scenes-sheet { width: min(620px, calc(100vw - 32px)); }
+.scenes-setup { display: flex; flex-direction: column; gap: 14px; }
+.scenes-sheet .actions { display: flex; gap: 8px; flex-wrap: wrap; }
+.scenes-sheet .actions .btn { flex: 1 1 180px; }
+.ai-settings { border: 1px solid var(--line); border-radius: 9px; padding: 10px 12px; }
+.ai-settings summary { cursor: pointer; font-weight: 500; font-size: 13.5px; }
+.ai-settings summary:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; border-radius: 4px; }
+.ai-fields { display: flex; flex-direction: column; gap: 12px; margin-top: 12px; align-items: flex-start; }
+.ai-fields .field { width: 100%; }
+.scene-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 10px; counter-reset: sc; }
+.scene-list:empty { display: none; }
+.scene { border: 1px solid var(--line); border-radius: 10px; padding: 12px; display: flex; flex-direction: column; gap: 8px; }
+.scene.active { border-color: var(--accent); box-shadow: 0 0 0 1px var(--accent); }
+.scene-head { display: flex; gap: 10px; align-items: center; min-width: 0; flex-wrap: wrap; }
+.scene-n { font: 500 12px var(--font-mono); color: var(--muted); width: 22px; height: 22px; border-radius: 50%; display: grid; place-items: center; box-shadow: inset 0 0 0 1px var(--line); flex: none; }
+.scene-title { flex: 1 1 200px; min-width: 0; appearance: none; border: 0; border-radius: 6px; background: transparent; color: var(--fg); font: 600 15px var(--font-ui); padding: 4px 6px; margin-left: -6px; }
+.scene-title:hover { background: var(--raise); }
+.scene-title:focus-visible { outline: 2px solid var(--accent); background: var(--raise); }
+.scene-sum { margin: 0; color: var(--muted); font-size: 13.5px; line-height: 1.5; }
+.scene-btns { display: flex; gap: 4px; flex-wrap: wrap; }
+.scene-btns .tool { box-shadow: inset 0 0 0 1px var(--line); }
+.fill.indeterminate { animation: indet 1.4s ease-in-out infinite; }
+@keyframes indet { 0% { margin-left: -30%; } 100% { margin-left: 100%; } }
+@media (prefers-reduced-motion: reduce) { .fill.indeterminate { animation: none; width: 100% !important; opacity: .5; } }
