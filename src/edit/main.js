@@ -10,6 +10,7 @@ import { extractAudio16k, peaks as computePeaks, ASR_RATE } from "./audio.js";
 import { exportEdit, ExportCancelled } from "./export.js";
 import { getProject, putProject, projectKey, findProject } from "./store.js";
 import { probeClip, joinClips, mergeDocs, canCopy, joinSize } from "./join.js";
+import { voiceSegments, embedWindow, wordSpeakers, talkTime, defaultName, MAX_SPEAKERS } from "./speakers.js";
 import { QUALITY, CODEC_NAMES, RES_NAME, fmtTime, fmtBytes, even, store, targetSize, friendly, saveBlob } from "../engine/media.js";
 
 const $ = (id) => document.getElementById(id);
@@ -26,6 +27,7 @@ const state = {
   reframe: { ...DEFAULT_REFRAME }, faceSamples: null, rfPath: null, rfJob: null,
   scenes: [], sceneJob: null, playUntil: 0,
   joining: null, joinedFile: null,
+  speakers: null, spkJob: null, spkSig: "",
   transcribing: null, exporting: null, out: null, loadId: 0,
 };
 const busy = () => !!(state.transcribing || state.exporting || state.joining);
@@ -128,7 +130,7 @@ async function loadFile(file) {
       file, key: projectKey(file), input, atrack: audioOk ? at : null, duration,
       srcW: vt.displayWidth, srcH: vt.displayHeight,
       colorFix: !cs?.matrix && Math.min(vt.codedWidth, vt.codedHeight) < 720,
-      doc: null, cuts: [], kept: [[0, duration]], peaks: null, audio: null, undo: [], redo: [], nowIdx: -1, captions: loadCaptionPrefs(), capCues: [], audioFx: loadAudioPrefs(), audioBase: null, chainLufs: {}, reframe: { ...DEFAULT_REFRAME }, faceSamples: null, rfPath: null, scenes: [],
+      doc: null, cuts: [], kept: [[0, duration]], peaks: null, audio: null, undo: [], redo: [], nowIdx: -1, captions: loadCaptionPrefs(), capCues: [], audioFx: loadAudioPrefs(), audioBase: null, chainLufs: {}, reframe: { ...DEFAULT_REFRAME }, faceSamples: null, rfPath: null, scenes: [], speakers: null,
       url: URL.createObjectURL(file),
     });
     $("player").style.aspectRatio = `${state.srcW} / ${state.srcH}`;
@@ -151,6 +153,7 @@ async function loadFile(file) {
     if (saved?.reframe) state.reframe = { ...DEFAULT_REFRAME, ...saved.reframe };
     if (saved?.faceSamples) state.faceSamples = saved.faceSamples;
     if (Array.isArray(saved?.scenes)) state.scenes = saved.scenes;
+    if (Array.isArray(saved?.speakers?.names)) state.speakers = saved.speakers;
     renderScenes();
     rebuildPath(); syncReframeUI(); applyFrame();
     if (needsTracking()) ensureTracking().catch(() => {});
@@ -304,10 +307,16 @@ function renderScript() {
   state.wordEls = new Array(doc.n); state.gapEls = new Map(); state.nowIdx = -1;
   const frag = document.createDocumentFragment();
   let p = null, inPara = 0;
+  const spk = state.speakers, spOf = (k) => doc.words[k]?.sp ?? -1;
   const newPara = (k) => {
     if (p) frag.append(p);
     p = document.createElement("p"); inPara = 0;
-    if (k < doc.n) { const st = document.createElement("span"); st.className = "stamp"; st.dataset.t = doc.words[k].s; st.textContent = fmtTime(doc.words[k].s); p.append(st); }
+    if (k >= doc.n) return;
+    const st = document.createElement("span"); st.className = "stamp"; st.dataset.t = doc.words[k].s; st.textContent = fmtTime(doc.words[k].s);
+    if (spk && (k === 0 || spOf(k) !== spOf(k - 1))) {
+      const head = document.createElement("span"); head.className = "p-head";
+      head.append(speakerChip(spOf(k), k), st); p.append(head);
+    } else p.append(st);
   };
   const gapEl = (k) => {
     const g = document.createElement("span"); g.className = "gap"; g.dataset.g = k;
@@ -318,7 +327,7 @@ function renderScript() {
   for (let k = 0; k <= doc.n; k++) {
     const gd = doc.gapDur(k);
     const prev = k > 0 ? doc.words[k - 1].t : "";
-    if (k > 0 && k < doc.n && inPara > 0 && (gd >= 1.5 || (/[.?!]$/.test(prev) && (gd >= 0.6 || inPara > 70)))) newPara(k);
+    if (k > 0 && k < doc.n && inPara > 0 && ((spk && spOf(k) !== spOf(k - 1)) || gd >= 1.5 || (/[.?!]$/.test(prev) && (gd >= 0.6 || inPara > 70)))) newPara(k);
     if (gd >= SHOW_GAP && (k < doc.n || doc.complete)) p.append(gapEl(k), " ");
     if (k === doc.n) break;
     const s = document.createElement("span"); s.className = "w"; s.dataset.i = k; s.textContent = doc.words[k].t;
@@ -326,6 +335,7 @@ function renderScript() {
   }
   frag.append(p);
   script.append(frag);
+  state.spkSig = speakerSig();
   if (state.find.q) runFind($("findInput").value, false);
 }
 
@@ -359,11 +369,12 @@ function afterEdit(persist = true) {
   state.cuts = doc ? doc.cutIntervals() : [];
   state.kept = doc ? doc.keptRanges(state.cuts) : (state.duration ? [[0, state.duration]] : []);
   state.capCues = doc ? buildCues(doc, state.captions, (t) => mapTime(t, state.cuts)) : [];
+  if (doc && speakerSig() !== state.spkSig) { renderScript(); if ($("spkDlg").open) renderSpeakers(); }
   updateClasses(); drawStrip(); updateStats(); updateExportInfo(); updateClock(); updateResume(); setToolsEnabled(); drawCapOverlay(); syncCaptionUI();
   if (persist && state.key) {
     clearTimeout(persistTimer);
     $("saved").textContent = "Saving…";
-    const key = state.key, snapshot = { doc: doc ? doc.toJSON() : null, peaks: state.peaks, captions: state.captions, audioFx: state.audioFx, audioBase: state.audioBase, chainLufs: state.chainLufs, reframe: state.reframe, faceSamples: state.faceSamples, scenes: state.scenes };
+    const key = state.key, snapshot = { doc: doc ? doc.toJSON() : null, peaks: state.peaks, captions: state.captions, audioFx: state.audioFx, audioBase: state.audioBase, chainLufs: state.chainLufs, reframe: state.reframe, faceSamples: state.faceSamples, scenes: state.scenes, speakers: state.speakers };
     persistTimer = setTimeout(async () => {
       const ok = await putProject(key, snapshot);
       $("saved").textContent = ok === null ? "Not saved in this browser" : "Saved";
@@ -383,6 +394,7 @@ function setToolsEnabled() {
   const has = !!state.doc && !busy();
   for (const id of ["trimBtn", "pauseLen", "fillerBtn", "restoreBtn", "findBtn"]) $(id).disabled = !has;
   $("scenesBtn").disabled = !state.doc?.n || !!state.transcribing;
+  $("speakersBtn").disabled = !state.doc?.n || !!state.transcribing;
   $("undoBtn").disabled = !has || !state.undo.length;
   $("redoBtn").disabled = !has || !state.redo.length;
   $("srtBtn").disabled = $("txtBtn").disabled = !state.doc?.n;
@@ -462,6 +474,8 @@ document.addEventListener("selectionchange", () => {
 script.addEventListener("scroll", () => { $("seltool").hidden = true; state.followUntil = performance.now() + 3000; }, { passive: true });
 
 script.addEventListener("click", (e) => {
+  const chip = e.target.closest(".spk-chip");
+  if (chip && state.doc) { e.preventDefault(); const k = +chip.dataset.k; openSpkMenu(chip, k, turnEnd(k)); return; }
   if (!getSelection().isCollapsed || editing) return;
   const st = e.target.closest(".stamp");
   if (st) { seek(+st.dataset.t); state.followUntil = 0; return; }
@@ -1055,7 +1069,7 @@ async function findScenes(useAI) {
   const ac = new AbortController(); state.sceneJob = ac; syncScenesUI();
   setSceneProgress("Asking OpenAI to find the scenes…");
   try {
-    const picks = await aiScenes({ key, model: $("openaiModel").value.trim() || DEFAULT_MODEL, sents, duration, count, signal: ac.signal, url: globalThis.__wetnixOpenAIUrl });
+    const picks = await aiScenes({ key, model: $("openaiModel").value.trim() || DEFAULT_MODEL, sents, duration, count, signal: ac.signal, url: globalThis.__wetnixOpenAIUrl, names: spkNames() });
     state.scenes = buildScenes(sents, picks, duration);
     afterScenes(`Found ${state.scenes.length} scenes.`);
   } catch (e) {
@@ -1374,6 +1388,238 @@ async function doJoin() {
   }
 }
 
+/* =====================================================================
+   Speakers: who is talking, on-device
+   ===================================================================== */
+const spkDlg = $("spkDlg");
+const spkNames = () => (state.speakers ? state.speakers.names : null);
+const spkName = (k) => (k >= 0 ? state.speakers?.names[k] || defaultName(k) : "Unlabelled");
+/** Turn starts and speakers, to know when the transcript's paragraphs need rebuilding. */
+function speakerSig() {
+  const d = state.doc; if (!d || !state.speakers) return "";
+  let sig = "", prev = -9;
+  for (let i = 0; i < d.n; i++) { const sp = d.words[i].sp ?? -1; if (sp !== prev) { sig += i + ":" + sp + ","; prev = sp; } }
+  return sig + "|" + state.speakers.names.join("\u0001");
+}
+function turnEnd(k) { const d = state.doc, sp = d.words[k]?.sp ?? -1; let i = k; while (i + 1 < d.n && (d.words[i + 1].sp ?? -1) === sp) i++; return i; }
+function speakerChip(sp, k) {
+  const b = document.createElement("button"); b.type = "button"; b.className = `spk-chip sc${sp < 0 ? "x" : sp % MAX_SPEAKERS}`; b.dataset.k = k;
+  b.textContent = spkName(sp); b.title = "Change who said this"; b.setAttribute("aria-haspopup", "menu"); b.contentEditable = "false";
+  return b;
+}
+
+$("speakersBtn").onclick = () => { if (!state.doc?.n) return; pause(); show("spkErr", ""); renderSpeakers(); spkDlg.showModal(); };
+$("spkClose").onclick = () => spkDlg.close();
+spkDlg.addEventListener("click", (e) => { if (e.target === spkDlg) spkDlg.close(); });
+$("spkDetect").onclick = () => (state.spkJob ? state.spkJob.cancel() : detectSpeakers());
+$("spkRedo").onclick = () => detectSpeakers();
+$("spkClear").onclick = () => {
+  edit((d) => { d.words.forEach((w) => { delete w.sp; }); });
+  state.speakers = null; renderScript(); afterEdit(); renderSpeakers();
+  show("spkNote", "Labels removed.");
+};
+for (const r of document.querySelectorAll('input[name="spkCount"]')) r.addEventListener("change", () => {
+  const sp = state.speakers;
+  if (sp?.data && !state.spkJob) regroup(val("spkCount")); // fingerprints are kept, so a new count is instant
+});
+
+function setSpkProgress(label, p, right = "") {
+  $("spkProgress").hidden = !label;
+  if (!label) return;
+  $("spkStatus").textContent = label; $("spkRight").textContent = right;
+  const f = $("spkFill"); f.classList.toggle("indeterminate", p == null); f.style.width = p == null ? "30%" : ((p || 0) * 100).toFixed(1) + "%";
+}
+
+let spkWorker = null, clusterSeq = 0;
+const clusterWaits = new Map();
+function getSpkWorker() {
+  if (spkWorker) return spkWorker;
+  spkWorker = new Worker(new URL("./speakers.worker.js", import.meta.url), { type: "module" });
+  spkWorker.addEventListener("message", (e) => {
+    const m = e.data;
+    if (m.id != null && clusterWaits.has(m.id)) {
+      const w = clusterWaits.get(m.id); clusterWaits.delete(m.id);
+      m.type === "clustered" ? w.ok(m.labels) : w.no(new Error(m.message));
+    }
+  });
+  return spkWorker;
+}
+function cluster(sp, count) {
+  const id = ++clusterSeq;
+  return new Promise((ok, no) => { clusterWaits.set(id, { ok, no }); getSpkWorker().postMessage({ type: "cluster", id, data: sp.data, dim: sp.dim, durs: sp.durs, count }); });
+}
+
+async function detectSpeakers() {
+  if (!state.doc?.n || state.spkJob || busy()) return;
+  show("spkErr", ""); show("spkNote", "");
+  let cancelled = false;
+  const ac = new AbortController();
+  state.spkJob = { cancel: () => { cancelled = true; ac.abort(); spkWorker?.terminate(); spkWorker = null; for (const w of clusterWaits.values()) w.no(new Error("cancelled")); clusterWaits.clear(); } };
+  syncSpeakersUI();
+  const t0 = performance.now();
+  try {
+    if (!state.audio) {
+      setSpkProgress("Reading audio…", 0);
+      state.audio = await extractAudio16k(state.atrack, state.duration, (p) => setSpkProgress("Reading audio…", p, Math.round(p * 100) + "%"), ac.signal);
+      state.peaks = computePeaks(state.audio); drawStrip();
+    }
+    const doc = state.doc, segs = voiceSegments(doc.words);
+    const windows = new Float64Array(segs.length * 2);
+    segs.forEach((g, k) => { const [a, b] = embedWindow(g, state.duration); windows[2 * k] = a; windows[2 * k + 1] = b; });
+    setSpkProgress("Loading voice model…", null);
+    const w = getSpkWorker();
+    const res = await new Promise((ok, no) => {
+      let started = 0;
+      const on = (e) => {
+        const m = e.data; if (m.id != null) return;
+        if (m.type === "download") setSpkProgress("Downloading voice model…", m.total ? m.loaded / m.total : null, `${fmtBytes(m.loaded)} of ${fmtBytes(m.total)}`);
+        else if (m.type === "status") setSpkProgress(m.text, null);
+        else if (m.type === "progress") {
+          started ||= performance.now();
+          const p = m.done / m.total, el = (performance.now() - started) / 1000;
+          setSpkProgress("Listening for voices…", p, p > 0.05 ? `${fmtTime(el / p - el)} left` : `${m.done} of ${m.total}`);
+        } else if (m.type === "done") { w.removeEventListener("message", on); ok(m); }
+        else if (m.type === "error") { w.removeEventListener("message", on); no(new Error(m.message)); }
+      };
+      w.addEventListener("message", on);
+      ac.signal.addEventListener("abort", () => no(new Error("cancelled")));
+      w.postMessage({ type: "run", audio: state.audio, windows });
+    });
+    if (state.doc !== doc) throw new Error("cancelled");
+    state.speakers = { names: [], count: val("spkCount"), segs: segs.map((g) => [g.s, g.e, g.i0, g.i1]), durs: segs.map((g) => g.e - g.s), data: res.data, dim: res.dim };
+    await regroup(val("spkCount"), true);
+    const secs = (performance.now() - t0) / 1000;
+    console.info(`speakers: ${segs.length} segments in ${secs.toFixed(1)} s on ${res.device}`);
+  } catch (e) {
+    if (!cancelled && e.message !== "cancelled") { console.error(e); show("spkErr", /fetch|network|Failed to load/i.test(e.message) ? "Couldn't download the voice model. Check your connection and try again." : friendly(e)); }
+    else show("spkNote", "Stopped.");
+  } finally {
+    state.spkJob = null; setSpkProgress(""); syncSpeakersUI();
+  }
+}
+
+/** Groups the stored voice fingerprints into `count` speakers and labels every word. */
+async function regroup(count, fresh = false) {
+  const sp = state.speakers; if (!sp?.data) return;
+  setSpkProgress("Grouping voices…", null);
+  try {
+    const labels = await cluster(sp, count === "auto" ? "auto" : +count);
+    const doc = state.doc; if (!doc) return;
+    const segs = sp.segs.map(([s, e, i0, i1]) => ({ s, e, i0, i1 }));
+    const per = wordSpeakers(doc.n, segs, labels);
+    const n = labels.length ? Math.max(...labels) + 1 : 0;
+    sp.count = count;
+    // keep names the user typed when the grouping is only re-run with another count
+    sp.names = Array.from({ length: n }, (_, k) => (!fresh && sp.names[k]) || defaultName(k));
+    edit((d) => { per.forEach((v, i) => { if (v >= 0) d.words[i].sp = v; else delete d.words[i].sp; }); });
+    renderScript(); renderSpeakers();
+    show("spkNote", n === 1 ? "Found one voice. If more people speak, choose how many above." : `Found ${n} speakers. Rename them below; the names appear in the transcript and in exported captions.`);
+  } catch (e) { if (e.message !== "cancelled") show("spkErr", friendly(e)); }
+  finally { if (!state.spkJob) setSpkProgress(""); }
+}
+
+function syncSpeakersUI() {
+  const job = !!state.spkJob, has = !!state.speakers;
+  $("spkSetup").hidden = has && !job;
+  $("spkDetect").textContent = job ? "Cancel" : "Detect speakers";
+  $("spkDetect").classList.toggle("primary", !job); $("spkDetect").classList.toggle("ghost", job);
+  $("spkActions").hidden = !has || job;
+  for (const r of document.querySelectorAll('input[name="spkCount"]')) r.disabled = job;
+  $("selSpk").hidden = !has;
+}
+
+function renderSpeakers() {
+  const ol = $("spkList"); ol.textContent = "";
+  const sp = state.speakers, doc = state.doc;
+  if (sp?.count) { const r = document.querySelector(`input[name="spkCount"][value="${sp.count}"]`); if (r) r.checked = true; }
+  syncSpeakersUI();
+  if (!sp || !doc) return;
+  const { total, kept } = talkTime(doc, sp.names.length), all = total.reduce((a, b) => a + b, 0) || 1;
+  const unl = doc.words.filter((w) => (w.sp ?? -1) < 0).length;
+  sp.names.forEach((name, k) => {
+    if (total[k] <= 0) return;
+    const li = document.createElement("li"); li.className = "spk"; li.dataset.k = k;
+    const dot = document.createElement("span"); dot.className = `spk-dot sc${k % MAX_SPEAKERS}`;
+    const inp = document.createElement("input"); inp.className = "spk-name"; inp.value = name; inp.maxLength = 40; inp.setAttribute("aria-label", `Name for ${defaultName(k)}`); inp.spellcheck = false;
+    inp.addEventListener("change", () => { sp.names[k] = inp.value.trim() || defaultName(k); inp.value = sp.names[k]; afterEdit(); });
+    inp.addEventListener("keydown", (e) => { if (e.key === "Enter") inp.blur(); });
+    const meta = document.createElement("span"); meta.className = "spk-meta";
+    const allCut = kept[k] <= 0.01;
+    meta.textContent = `${fmtTime(total[k])} · ${Math.round((total[k] / all) * 100)}%` + (allCut ? " · all cut" : kept[k] < total[k] - 0.5 ? ` · ${fmtTime(kept[k])} kept` : "");
+    const btns = document.createElement("div"); btns.className = "spk-btns";
+    const mk = (text, fn, cls = "") => { const b = document.createElement("button"); b.type = "button"; b.className = "tool " + cls; b.textContent = text; b.onclick = fn; return b; };
+    btns.append(mk("Play", () => playSpeaker(k), "spk-play"));
+    btns.append(mk(allCut ? "Restore all" : "Cut all", () => cutSpeaker(k, !allCut), "spk-cut"));
+    const others = sp.names.map((_, j) => j).filter((j) => j !== k && total[j] > 0);
+    if (others.length) {
+      const sel = document.createElement("select"); sel.className = "sel spk-merge"; sel.setAttribute("aria-label", `Merge ${name} into another speaker`);
+      sel.append(new Option("Merge into…", ""), ...others.map((j) => new Option(sp.names[j], j)));
+      sel.onchange = () => { if (sel.value === "") return; const to = +sel.value; edit((d) => { d.words.forEach((w) => { if (w.sp === k) w.sp = to; }); }); show("spkNote", `Merged ${name} into ${sp.names[to]}. Undo reverses it.`); renderSpeakers(); };
+      btns.append(sel);
+    }
+    li.append(dot, inp, meta, btns);
+    ol.append(li);
+  });
+  if (unl) { const li = document.createElement("li"); li.className = "spk-unl"; li.textContent = `${unl} word${unl === 1 ? " was" : "s were"} transcribed after detection and ${unl === 1 ? "isn't" : "aren't"} labelled yet. Detect again to include ${unl === 1 ? "it" : "them"}.`; ol.append(li); }
+}
+function cutSpeaker(k, cut) {
+  edit((d) => { let any = false; d.words.forEach((w, i) => { if (w.sp === k && !!d.cutW[i] !== cut) { d.cutW[i] = cut ? 1 : 0; any = true; } }); return any; });
+  show("spkNote", cut ? `Cut everything ${spkName(k)} says. Undo or "Restore all" brings it back.` : `Restored ${spkName(k)}.`);
+  renderSpeakers();
+}
+/** Plays the speaker's first turn that's at least 1.5 s long (or their longest). */
+function playSpeaker(k) {
+  const d = state.doc; let best = null;
+  for (let i = 0; i < d.n; i++) {
+    if (d.words[i].sp !== k || (i > 0 && d.words[i - 1].sp === k)) continue;
+    const e = turnEnd(i), len = d.words[e].e - d.words[i].s;
+    if (!best || (best.len < 1.5 && len > best.len)) best = { i, e, len };
+    if (best.len >= 1.5) break;
+  }
+  if (!best) return;
+  spkDlg.close(); seek(d.words[best.i].s); state.followUntil = 0; play(); state.playUntil = Math.min(d.words[best.e].e + 0.15, d.words[best.i].s + 8);
+}
+
+/* ---------- reassign a turn or a selection ---------- */
+const spkMenu = $("spkMenu");
+let menuFor = null;
+function openSpkMenu(anchor, i0, i1) {
+  const sp = state.speakers; if (!sp) return;
+  menuFor = { i0, i1 }; spkMenu.textContent = "";
+  const cur = i0 === i1 || state.doc.words.slice(i0, i1 + 1).every((w) => w.sp === state.doc.words[i0].sp) ? state.doc.words[i0].sp ?? -1 : -2;
+  const { total } = talkTime(state.doc, sp.names.length);
+  const item = (label, k, cls) => {
+    const b = document.createElement("button"); b.type = "button"; b.setAttribute("role", "menuitemradio"); b.setAttribute("aria-checked", String(k === cur));
+    const dot = document.createElement("span"); dot.className = `spk-dot ${cls}`; b.append(dot, label);
+    b.onclick = () => assignSpeaker(k); return b;
+  };
+  sp.names.forEach((n, k) => { if (total[k] > 0 || k === cur) spkMenu.append(item(n, k, `sc${k % MAX_SPEAKERS}`)); });
+  if (sp.names.length < MAX_SPEAKERS) spkMenu.append(item("New speaker", sp.names.length, "new"));
+  spkMenu.hidden = false;
+  const r = anchor.getBoundingClientRect(), mw = spkMenu.offsetWidth, mh = spkMenu.offsetHeight;
+  spkMenu.style.left = Math.max(8, Math.min(r.left, innerWidth - mw - 8)) + "px";
+  spkMenu.style.top = (r.bottom + 4 + mh > innerHeight ? Math.max(8, r.top - mh - 4) : r.bottom + 4) + "px";
+  (spkMenu.querySelector('[aria-checked="true"]') || spkMenu.firstElementChild)?.focus();
+}
+function closeSpkMenu() { spkMenu.hidden = true; menuFor = null; }
+function assignSpeaker(k) {
+  const m = menuFor, sp = state.speakers; closeSpkMenu();
+  if (!m || !sp) return;
+  if (k >= sp.names.length) sp.names.push(defaultName(k));
+  edit((d) => { let any = false; for (let i = m.i0; i <= m.i1; i++) if (d.words[i].sp !== k) { d.words[i].sp = k; any = true; } return any; });
+  getSelection().removeAllRanges(); $("seltool").hidden = true;
+}
+spkMenu.addEventListener("keydown", (e) => {
+  const items = [...spkMenu.querySelectorAll("button")], i = items.indexOf(document.activeElement);
+  if (e.key === "Escape") { e.preventDefault(); closeSpkMenu(); }
+  else if (e.key === "ArrowDown") { e.preventDefault(); items[(i + 1) % items.length].focus(); }
+  else if (e.key === "ArrowUp") { e.preventDefault(); items[(i - 1 + items.length) % items.length].focus(); }
+});
+document.addEventListener("pointerdown", (e) => { if (!spkMenu.hidden && !spkMenu.contains(e.target) && !e.target.closest(".spk-chip, #selSpk")) closeSpkMenu(); }, true);
+script.addEventListener("scroll", () => { if (!spkMenu.hidden) closeSpkMenu(); }, { passive: true });
+$("selSpk").onmousedown = (e) => e.preventDefault(); // keep the text selection
+$("selSpk").onclick = () => { const t = selectedTokens(); if (!t?.words.length) return; openSpkMenu($("selSpk"), t.words[0], t.words.at(-1)); };
+
 async function renderEdit(ranges, signal, onProgress) {
   const [ow, oh] = outDims(), fmt = val("fmt"), res = val("res"), upscale = res !== "orig";
   if (state.captions.on && state.capCues.length) await loadCaptionFonts();
@@ -1442,8 +1688,8 @@ function setExporting(b) {
 
 $("saveBtn").onclick = async () => { if (!state.out) return; try { await saveBlob(state.out.blob, state.out.name); } catch (e) { show("xErr", e.message); } };
 const baseName = () => state.file?.name.replace(/\.[^.]+$/, "") || "transcript";
-$("srtBtn").onclick = async () => { if (!state.doc) return; try { await saveBlob(new Blob([toSRT(captionCues(state.doc, state.cuts))], { type: "text/plain" }), `${baseName()}_edited.srt`); } catch (e) { show("xErr", e.message); } };
-$("txtBtn").onclick = async () => { if (!state.doc) return; try { await saveBlob(new Blob([toText(state.doc) + "\n"], { type: "text/plain" }), `${baseName()}_edited.txt`); } catch (e) { show("xErr", e.message); } };
+$("srtBtn").onclick = async () => { if (!state.doc) return; try { await saveBlob(new Blob([toSRT(captionCues(state.doc, state.cuts), spkNames())], { type: "text/plain" }), `${baseName()}_edited.srt`); } catch (e) { show("xErr", e.message); } };
+$("txtBtn").onclick = async () => { if (!state.doc) return; try { await saveBlob(new Blob([toText(state.doc, spkNames()) + "\n"], { type: "text/plain" }), `${baseName()}_edited.txt`); } catch (e) { show("xErr", e.message); } };
 
 window.addEventListener("beforeunload", (e) => { if (busy()) { e.preventDefault(); e.returnValue = ""; } });
 

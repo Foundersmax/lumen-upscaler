@@ -32,8 +32,8 @@ export function buildCues(doc, opts, map = (t) => t) {
     if (doc.cutW[i]) continue;
     const w = doc.words[i];
     const gapBefore = cur ? map(w.s) - map(cur.e) : 0;
-    if (cur && (cur.words.length >= max || gapBefore > 0.7 || map(w.e) - map(cur.s) > 4.5)) flush();
-    if (!cur) cur = { s: w.s, e: w.e, words: [] };
+    if (cur && (cur.words.length >= max || gapBefore > 0.7 || map(w.e) - map(cur.s) > 4.5 || (w.sp ?? -1) !== cur.sp)) flush();
+    if (!cur) cur = { s: w.s, e: w.e, words: [], sp: w.sp ?? -1 };
     cur.words.push({ t: w.t, s: w.s, e: w.e });
     cur.e = w.e;
     if (max > 1 && /[.?!]$/.test(w.t)) flush();

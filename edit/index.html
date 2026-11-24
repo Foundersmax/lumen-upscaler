@@ -216,6 +216,8 @@
           <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5"><circle cx="7" cy="7" r="4.5"/><path d="m10.5 10.5 3 3"/></svg>Find</button>
         <button class="tool" id="scenesBtn" type="button" disabled title="Split into separate videos">
           <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5"><rect x="1.5" y="3" width="5.5" height="10" rx="1"/><rect x="9" y="3" width="5.5" height="10" rx="1"/></svg>Scenes</button>
+        <button class="tool" id="speakersBtn" type="button" disabled title="Label who is speaking">
+          <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5"><circle cx="5.5" cy="5.5" r="2.2"/><path d="M1.8 13c.4-2.2 1.9-3.4 3.7-3.4S8.8 10.8 9.2 13"/><circle cx="11.2" cy="6.2" r="1.8"/><path d="M10.4 9.7c.3-.1.5-.1.8-.1 1.5 0 2.7 1 3 2.9"/></svg>Speakers</button>
         <span class="spacer"></span>
         <span class="saved" id="saved" aria-live="polite"></span>
         <button class="tool" id="undoBtn" type="button" disabled aria-label="Undo" title="Undo (Ctrl+Z)"><svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M5.5 3.5 2.5 6.5l3 3"/><path d="M2.5 6.5h7a4 4 0 0 1 0 8H7"/></svg></button>
@@ -390,8 +392,46 @@
   </div>
 </dialog>
 
+<dialog class="sheet spk-sheet" id="spkDlg" aria-labelledby="spkTitle">
+  <div class="sheet-head">
+    <h2 id="spkTitle">Speakers</h2>
+    <button class="xbtn" id="spkClose" type="button" aria-label="Close"><svg viewBox="0 0 14 14" fill="none" stroke="currentColor" stroke-width="1.6"><path d="m3 3 8 8M11 3l-8 8"/></svg></button>
+  </div>
+  <div class="sheet-body">
+    <p class="help" id="spkLead">Find out who is speaking, label the transcript, and keep or cut each person's parts.</p>
+    <div class="group">
+      <div class="label">How many people speak</div>
+      <div class="seg" role="radiogroup" aria-label="Number of speakers">
+        <input type="radio" name="spkCount" id="spkAuto" value="auto" checked><label for="spkAuto">Auto</label>
+        <input type="radio" name="spkCount" id="spk2" value="2"><label for="spk2">2</label>
+        <input type="radio" name="spkCount" id="spk3" value="3"><label for="spk3">3</label>
+        <input type="radio" name="spkCount" id="spk4" value="4"><label for="spk4">4</label>
+        <input type="radio" name="spkCount" id="spk5" value="5"><label for="spk5">5</label>
+        <input type="radio" name="spkCount" id="spk6" value="6"><label for="spk6">6</label>
+      </div>
+    </div>
+    <div class="actions" id="spkSetup">
+      <button class="btn primary" id="spkDetect" type="button">Detect speakers</button>
+    </div>
+    <div class="progress" id="spkProgress" hidden>
+      <div class="track"><div class="fill" id="spkFill"></div></div>
+      <div class="stats"><span id="spkStatus">Working…</span><span id="spkRight"></span></div>
+    </div>
+    <div class="note" id="spkNote" hidden></div>
+    <div class="err" id="spkErr" role="alert" hidden></div>
+    <ol class="spk-list" id="spkList"></ol>
+    <div class="actions" id="spkActions" hidden>
+      <button class="btn ghost" id="spkRedo" type="button">Detect again</button>
+      <button class="linkbtn danger" id="spkClear" type="button">Remove labels</button>
+    </div>
+    <p class="help" id="spkHelp">Runs on this device: a 7 MB voice model downloads once and nothing is uploaded. Click a name in the transcript to change who said that part, or select words and choose Speaker.</p>
+  </div>
+</dialog>
+
+<div class="spk-menu" id="spkMenu" role="menu" hidden></div>
+
 <div class="seltool" id="seltool" hidden>
-  <button type="button" id="selCut">Cut</button><button type="button" id="selRestore">Restore</button><button type="button" id="selPlay">Play</button>
+  <button type="button" id="selCut">Cut</button><button type="button" id="selRestore">Restore</button><button type="button" id="selPlay">Play</button><button type="button" id="selSpk" hidden>Speaker</button>
 </div>
 <noscript><p style="padding:16px">Wetnix needs JavaScript enabled.</p></noscript>
 <script type="module" src="../src/edit/main.js"></script>

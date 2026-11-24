@@ -53,8 +53,12 @@ export class Doc {
     return !!(this.cutG[k] || (k > 0 && this.cutW[k - 1]) || (k < this.n && this.cutW[k]));
   }
 
-  snapshot() { return { w: this.cutW.slice(), g: this.cutG.slice(), t: this.words.map((x) => x.t) }; }
-  restore(s) { this.cutW.set(s.w); this.cutG.set(s.g); if (s.t) s.t.forEach((t, i) => { if (this.words[i]) this.words[i].t = t; }); }
+  snapshot() { return { w: this.cutW.slice(), g: this.cutG.slice(), t: this.words.map((x) => x.t), sp: this.words.map((x) => x.sp ?? -1) }; }
+  restore(s) {
+    this.cutW.set(s.w); this.cutG.set(s.g);
+    if (s.t) s.t.forEach((t, i) => { if (this.words[i]) this.words[i].t = t; });
+    if (s.sp) s.sp.forEach((v, i) => { const w = this.words[i]; if (!w) return; if (v >= 0) w.sp = v; else delete w.sp; });
+  }
   toJSON() { return { words: this.words, duration: this.duration, limit: this.limit, cutW: Array.from(this.cutW), cutG: Array.from(this.cutG) }; }
   static fromJSON(o) {
     const d = new Doc(o.words, o.duration, o.limit ?? o.duration);
@@ -169,8 +173,8 @@ export function captionCues(doc, cuts = doc.cutIntervals(), { maxChars = 42, max
   doc.words.forEach((w, i) => {
     if (doc.cutW[i]) return;
     const s = mapTime(w.s, cuts), e = mapTime(w.e, cuts);
-    if (cur && (cur.text.length + 1 + w.t.length > maxChars || e - cur.s > maxDur || s - cur.e > 0.8)) flush();
-    if (!cur) cur = { s, e, text: w.t };
+    if (cur && (cur.text.length + 1 + w.t.length > maxChars || e - cur.s > maxDur || s - cur.e > 0.8 || (w.sp ?? -1) !== cur.sp)) flush();
+    if (!cur) cur = { s, e, text: w.t, sp: w.sp ?? -1 };
     else { cur.text += " " + w.t; cur.e = e; }
     if (/[.?!]$/.test(w.t)) flush();
   });
@@ -178,10 +182,26 @@ export function captionCues(doc, cuts = doc.cutIntervals(), { maxChars = 42, max
   return cues;
 }
 
-export function toSRT(cues) {
-  return cues.map((c, i) => `${i + 1}\n${srtTime(c.s)} --> ${srtTime(Math.max(c.e, c.s + 0.3))}\n${c.text}\n`).join("\n");
+/** SubRip captions. With speaker names, each cue where the speaker changes starts with "Name: ". */
+export function toSRT(cues, names = null) {
+  let prev = -2;
+  return cues.map((c, i) => {
+    const who = names && c.sp >= 0 && c.sp !== prev && names[c.sp] ? `${names[c.sp]}: ` : "";
+    prev = c.sp;
+    return `${i + 1}\n${srtTime(c.s)} --> ${srtTime(Math.max(c.e, c.s + 0.3))}\n${who}${c.text}\n`;
+  }).join("\n");
 }
 
-export function toText(doc) {
-  return doc.words.filter((_, i) => !doc.cutW[i]).map((w) => w.t).join(" ").replace(/\s+([,.?!;:])/g, "$1");
+const joinWords = (ws) => ws.map((w) => w.t).join(" ").replace(/\s+([,.?!;:])/g, "$1");
+
+/** Plain transcript of the edit. With speaker names: one paragraph per turn, "Name: text". */
+export function toText(doc, names = null) {
+  const kept = doc.words.filter((_, i) => !doc.cutW[i]);
+  if (!names) return joinWords(kept);
+  const out = [];
+  for (const w of kept) {
+    const sp = w.sp ?? -1;
+    if (out.length && out.at(-1).sp === sp) out.at(-1).ws.push(w); else out.push({ sp, ws: [w] });
+  }
+  return out.map((t) => (t.sp >= 0 && names[t.sp] ? `${names[t.sp]}: ` : "") + joinWords(t.ws)).join("\n\n");
 }

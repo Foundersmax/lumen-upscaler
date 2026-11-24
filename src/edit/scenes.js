@@ -14,22 +14,22 @@ export function sentences(doc) {
   for (let i = 0; i < doc.n; i++) {
     if (doc.cutW[i]) continue;
     const w = doc.words[i];
-    if (cur && (w.s - cur.e > 1.0 || cur.count >= 40)) { out.push(cur); cur = null; }
-    if (!cur) cur = { s: w.s, e: w.e, text: w.t, count: 1 };
+    if (cur && (w.s - cur.e > 1.0 || cur.count >= 40 || (w.sp ?? -1) !== cur.sp)) { out.push(cur); cur = null; }
+    if (!cur) cur = { s: w.s, e: w.e, text: w.t, count: 1, sp: w.sp ?? -1 };
     else { cur.e = w.e; cur.text += " " + w.t; cur.count++; }
     if (/[.?!]["')\]]?$/.test(w.t)) { out.push(cur); cur = null; }
   }
   if (cur) out.push(cur);
-  return out.map(({ s, e, text }) => ({ s, e, text }));
+  return out.map(({ s, e, text, sp }) => ({ s, e, text, sp }));
 }
 
 const mmss = (t) => { t = Math.max(0, Math.floor(t)); const h = Math.floor(t / 3600), m = Math.floor(t / 60) % 60, s = t % 60; return (h ? `${h}:${String(m).padStart(2, "0")}` : `${m}`) + `:${String(s).padStart(2, "0")}`; };
 
 /** "[index] m:ss text" lines, trimmed to a character budget so very long videos still fit one request. */
-export function transcriptLines(sents, budget = 120000) {
+export function transcriptLines(sents, budget = 120000, names = null) {
   const total = sents.reduce((n, x) => n + x.text.length + 12, 0);
   const per = total > budget ? Math.max(40, Math.floor((budget / sents.length) - 12)) : Infinity;
-  return sents.map((x, i) => `[${i}] ${mmss(x.s)} ${x.text.length > per ? x.text.slice(0, per) + "…" : x.text}`).join("\n");
+  return sents.map((x, i) => `[${i}] ${mmss(x.s)} ${names && x.sp >= 0 && names[x.sp] ? names[x.sp] + ": " : ""}${x.text.length > per ? x.text.slice(0, per) + "…" : x.text}`).join("\n");
 }
 
 const SCHEMA = {
@@ -55,14 +55,14 @@ export class AIError extends Error {}
  * Asks OpenAI for scene boundaries. Sends only transcript text and timestamps.
  * @returns {Promise<{start_index:number,title:string,summary:string}[]>}
  */
-export async function aiScenes({ key, model = DEFAULT_MODEL, sents, duration, count, signal, url = OPENAI_URL }) {
+export async function aiScenes({ key, model = DEFAULT_MODEL, sents, duration, count, signal, url = OPENAI_URL, names = null }) {
   if (!key) throw new AIError("Add your OpenAI API key first.");
   const want = count === "auto" ? "between 4 and 6 scenes (fewer for short videos)" : `exactly ${count} scenes`;
   const body = {
     model,
     messages: [
       { role: "system", content: "You split long video transcripts into self-contained scenes for separate short videos. Each scene must cover one topic or segment and make sense on its own. Scenes are contiguous and together cover the whole video. Choose boundaries where the topic changes, never mid-thought. Write titles and summaries in the transcript's language." },
-      { role: "user", content: `Video length: ${mmss(duration)}. Split it into ${want}. The first scene starts at sentence 0. Return each scene's starting sentence index, a title and a one-sentence summary.\n\nTranscript (one sentence per line: [index] start time, text):\n${transcriptLines(sents)}` },
+      { role: "user", content: `Video length: ${mmss(duration)}. Split it into ${want}. The first scene starts at sentence 0. Return each scene's starting sentence index, a title and a one-sentence summary.\n\nTranscript (one sentence per line: [index] start time, ${names ? "speaker: " : ""}text):\n${transcriptLines(sents, 120000, names)}` },
     ],
     response_format: { type: "json_schema", json_schema: { name: "scenes", strict: true, schema: SCHEMA } },
   };
