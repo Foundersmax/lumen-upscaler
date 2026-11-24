@@ -8,7 +8,8 @@ import { sentences, aiScenes, pauseScenes, buildScenes, sceneRanges, slug, DEFAU
 import { CAPTION_STYLES, CAPTION_COLORS, DEFAULT_CAPTIONS, buildCues, mapCues, rangeMapper, drawCaptions, loadCaptionFonts } from "./captions.js";
 import { extractAudio16k, peaks as computePeaks, ASR_RATE } from "./audio.js";
 import { exportEdit, ExportCancelled } from "./export.js";
-import { getProject, putProject, projectKey } from "./store.js";
+import { getProject, putProject, projectKey, findProject } from "./store.js";
+import { probeClip, joinClips, mergeDocs, canCopy, joinSize } from "./join.js";
 import { QUALITY, CODEC_NAMES, RES_NAME, fmtTime, fmtBytes, even, store, targetSize, friendly, saveBlob } from "../engine/media.js";
 
 const $ = (id) => document.getElementById(id);
@@ -24,9 +25,10 @@ const state = {
   audioFx: loadAudioPrefs(), audioBase: null, chainLufs: {}, audioJob: null,
   reframe: { ...DEFAULT_REFRAME }, faceSamples: null, rfPath: null, rfJob: null,
   scenes: [], sceneJob: null, playUntil: 0,
+  joining: null, joinedFile: null,
   transcribing: null, exporting: null, out: null, loadId: 0,
 };
-const busy = () => !!(state.transcribing || state.exporting);
+const busy = () => !!(state.transcribing || state.exporting || state.joining);
 const show = (id, msg) => { const el = $(id); el.hidden = !msg; el.textContent = msg || ""; };
 
 /* =====================================================================
@@ -78,7 +80,15 @@ $("empty").onclick = () => pickFile();
 $("empty").onkeydown = (e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); pickFile(); } };
 $("changeBtn").onclick = () => pickFile();
 function pickFile() { if (!busy()) $("file").click(); }
-$("file").addEventListener("change", (e) => { const f = e.target.files[0]; if (f) loadFile(f); e.target.value = ""; });
+$("file").addEventListener("change", (e) => { const fs = [...e.target.files]; e.target.value = ""; openFiles(fs); });
+/** One file opens directly; several open the Join dialog. */
+function openFiles(files) {
+  const vids = files.filter(isVideoFile);
+  const list = vids.length ? vids : files.slice(0, 1);
+  if (list.length > 1) openJoin(list);
+  else if (list.length) loadFile(list[0]);
+}
+const isVideoFile = (f) => /^video\//.test(f.type) || /\.(mp4|m4v|mov|webm|mkv|ts|mts)$/i.test(f.name);
 
 let dragDepth = 0;
 const hasFiles = (e) => [...(e.dataTransfer?.types || [])].includes("Files");
@@ -87,8 +97,9 @@ window.addEventListener("dragleave", (e) => { if (!hasFiles(e)) return; if (--dr
 window.addEventListener("dragover", (e) => { if (hasFiles(e)) e.preventDefault(); });
 window.addEventListener("drop", (e) => {
   if (!hasFiles(e)) return; e.preventDefault(); dragDepth = 0; $("drop").classList.remove("on");
-  const f = [...e.dataTransfer.files].find((f) => /^video\//.test(f.type) || /\.(mp4|m4v|mov|webm|mkv|ts|mts)$/i.test(f.name)) || e.dataTransfer.files[0];
-  if (f) loadFile(f);
+  const files = [...e.dataTransfer.files];
+  if ($("joinDlg").open) { addClips(files.filter(isVideoFile)); return; }
+  openFiles(files);
 });
 
 async function loadFile(file) {
@@ -124,6 +135,7 @@ async function loadFile(file) {
     video.src = state.url; show("videoMsg", "");
     $("empty").hidden = true; $("playBtn").disabled = false;
     $("filebar").hidden = false;
+    $("saveJoinedBtn").hidden = file !== state.joinedFile;
     const fname = $("fileName"); fname.textContent = ""; fname.title = file.name;
     const b = document.createElement("b"); b.textContent = file.name;
     fname.append(b, ` · ${state.srcW}×${state.srcH} · ${fmtTime(duration)}`);
@@ -131,7 +143,7 @@ async function loadFile(file) {
     updateResOptions();
 
     state.audioJob?.abort(); state.audioJob = null; state.rfJob?.abort(); state.rfJob = null;
-    const saved = await getProject(state.key);
+    const saved = await findProject(file);
     if (saved?.audioFx) state.audioFx = { ...DEFAULT_AUDIO, ...saved.audioFx };
     if (saved?.audioBase?.profile?.power) { state.audioBase = saved.audioBase; state.chainLufs = saved.chainLufs || {}; }
     syncAudioUI(); configurePreview();
@@ -1192,6 +1204,176 @@ $("exportBtn").addEventListener("click", () => state.exporting ? state.exporting
  * Renders the given source ranges with every current setting (size, format, captions, reframe,
  * Studio voice). Shared by Export and scene export. Caller owns state.exporting.
  */
+/* =====================================================================
+   Join clips: several videos become one source for the editor
+   ===================================================================== */
+const join = { clips: [], reading: 0, seq: 0 };
+const jdlg = $("joinDlg");
+const ICON = {
+  grip: '<svg viewBox="0 0 12 12" fill="currentColor"><circle cx="4" cy="2.5" r="1.1"/><circle cx="8" cy="2.5" r="1.1"/><circle cx="4" cy="6" r="1.1"/><circle cx="8" cy="6" r="1.1"/><circle cx="4" cy="9.5" r="1.1"/><circle cx="8" cy="9.5" r="1.1"/></svg>',
+  up: '<svg viewBox="0 0 14 14" fill="none" stroke="currentColor" stroke-width="1.6"><path d="m3.5 8.5 3.5-3.5 3.5 3.5"/></svg>',
+  down: '<svg viewBox="0 0 14 14" fill="none" stroke="currentColor" stroke-width="1.6"><path d="m3.5 5.5 3.5 3.5 3.5-3.5"/></svg>',
+  x: '<svg viewBox="0 0 14 14" fill="none" stroke="currentColor" stroke-width="1.6"><path d="m3.5 3.5 7 7M10.5 3.5l-7 7"/></svg>',
+};
+
+function openJoin(files, withCurrent = false) {
+  if (busy()) { show("err", "Finish or cancel the current task before joining clips."); return; }
+  join.clips = []; show("jErr", ""); setJoinProgress("");
+  renderClips();
+  if (!jdlg.open) jdlg.showModal();
+  addClips(withCurrent && state.file ? [state.file, ...files] : files);
+}
+$("addClipsBtn").onclick = () => { if (busy()) return; openJoin([], true); $("clipFiles").click(); };
+$("addMoreClips").onclick = () => $("clipFiles").click();
+$("clipFiles").addEventListener("change", (e) => { const fs = [...e.target.files]; e.target.value = ""; addClips(fs); });
+$("joinClose").onclick = () => jdlg.close();
+jdlg.addEventListener("click", (e) => { if (e.target === jdlg && !state.joining) jdlg.close(); });
+jdlg.addEventListener("close", () => state.joining?.abort());
+$("saveJoinedBtn").onclick = async () => { if (!state.joinedFile) return; try { await saveBlob(state.joinedFile, state.joinedFile.name); } catch (e) { show("err", e.message); } };
+
+async function addClips(files) {
+  if (!files.length) return;
+  join.reading++; syncJoinUI();
+  const errs = [];
+  for (const f of files) {
+    try {
+      const info = await probeClip(f);
+      const saved = await findProject(f).catch(() => null);
+      const d = saved?.doc?.words?.length && Math.abs(saved.doc.duration - info.end) < 0.5 ? saved.doc : null;
+      info.tx = !d ? "" : (d.limit ?? d.duration) >= info.end - 0.25 ? "Transcribed" : "Partly transcribed";
+      info.saved = saved; info.doc = d; info.id = ++join.seq;
+      join.clips.push(info);
+      renderClips();
+    } catch (e) { errs.push(e.message || String(e)); }
+  }
+  join.reading--;
+  show("jErr", errs.join(" "));
+  syncJoinUI();
+}
+
+function renderClips() {
+  const ol = $("clipList"); ol.textContent = "";
+  join.clips.forEach((c, i) => {
+    const li = document.createElement("li"); li.className = "clip"; li.dataset.id = c.id;
+    const grip = document.createElement("span"); grip.className = "clip-grip"; grip.innerHTML = ICON.grip; grip.setAttribute("aria-hidden", "true");
+    grip.addEventListener("pointerdown", (e) => dragClip(e, li));
+    const n = document.createElement("span"); n.className = "clip-n"; n.textContent = i + 1;
+    const info = document.createElement("div"); info.className = "clip-info";
+    const name = document.createElement("div"); name.className = "clip-name"; name.textContent = c.name; name.title = c.name;
+    const meta = document.createElement("div"); meta.className = "clip-meta";
+    meta.append(Object.assign(document.createElement("span"), { textContent: `${c.w}×${c.h}` }), Object.assign(document.createElement("span"), { textContent: fmtTime(c.duration) }));
+    if (!c.acodec) meta.append(Object.assign(document.createElement("span"), { textContent: "no sound" }));
+    if (c.tx) meta.append(Object.assign(document.createElement("span"), { className: "tx", textContent: c.tx }));
+    info.append(name, meta);
+    const btns = document.createElement("div"); btns.className = "clip-btns";
+    const mk = (cls, label, icon, fn, dis) => { const b = document.createElement("button"); b.type = "button"; b.className = "tool " + cls; b.innerHTML = icon; b.setAttribute("aria-label", `${label}: ${c.name}`); b.title = label; b.disabled = dis || !!state.joining; b.onclick = fn; return b; };
+    btns.append(
+      mk("up", "Move up", ICON.up, () => moveClip(i, i - 1), i === 0),
+      mk("down", "Move down", ICON.down, () => moveClip(i, i + 1), i === join.clips.length - 1),
+      mk("rm", "Remove", ICON.x, () => { join.clips.splice(i, 1); renderClips(); syncJoinUI(); }),
+    );
+    li.append(grip, n, info, btns);
+    ol.append(li);
+  });
+  syncJoinUI();
+}
+function moveClip(from, to) {
+  if (to < 0 || to >= join.clips.length || state.joining) return;
+  const [c] = join.clips.splice(from, 1); join.clips.splice(to, 0, c);
+  renderClips();
+  $("clipList").children[to]?.querySelector(to < from ? ".up" : ".down")?.focus();
+}
+/** Pointer drag (mouse and touch): the row follows the pointer; the order is read back from the list on release.
+ *  Listens on the window because moving the row in the DOM drops pointer capture. */
+function dragClip(e, li) {
+  if (state.joining || e.button > 0) return;
+  e.preventDefault();
+  const ol = $("clipList"); li.classList.add("dragging");
+  const move = (ev) => {
+    for (const other of ol.children) {
+      if (other === li) continue;
+      const r = other.getBoundingClientRect();
+      if (ev.clientY > r.top && ev.clientY < r.bottom) {
+        ol.insertBefore(li, ev.clientY < r.top + r.height / 2 ? other : other.nextSibling);
+        break;
+      }
+    }
+  };
+  const up = () => {
+    removeEventListener("pointermove", move); removeEventListener("pointerup", up); removeEventListener("pointercancel", up);
+    li.classList.remove("dragging");
+    const order = [...ol.children].map((x) => +x.dataset.id);
+    join.clips.sort((a, b) => order.indexOf(a.id) - order.indexOf(b.id));
+    renderClips();
+  };
+  addEventListener("pointermove", move); addEventListener("pointerup", up); addEventListener("pointercancel", up);
+}
+
+function syncJoinUI() {
+  const n = join.clips.length, job = !!state.joining;
+  $("clipReading").hidden = !join.reading;
+  $("addMoreClips").disabled = job;
+  $("joinBtn").disabled = !job && (n < 2 || join.reading > 0);
+  $("joinBtn").textContent = job ? "Cancel" : n >= 2 ? `Join ${n} clips` : "Join clips";
+  $("joinBtn").classList.toggle("primary", !job); $("joinBtn").classList.toggle("ghost", job);
+  $("joinTotal").textContent = n ? `${n} clip${n === 1 ? "" : "s"} · ${fmtTime(join.clips.reduce((t, c) => t + c.duration, 0))}` : "";
+  const mode = $("joinMode");
+  if (n < 2) { mode.hidden = true; return; }
+  mode.hidden = false; mode.textContent = "";
+  const b = document.createElement("b");
+  if (canCopy(join.clips)) {
+    b.textContent = "Lossless join. ";
+    mode.append(b, "These clips share the same format, so they're joined without re-encoding: no quality loss, and it only takes a moment.");
+  } else {
+    const [W, H] = joinSize(join.clips), first = join.clips[0];
+    const shape = join.clips.some((c) => Math.abs(c.w / c.h - first.w / first.h) > 0.01);
+    b.textContent = "Re-encoded at high quality. ";
+    mode.append(b, `These clips were recorded with different settings, so they're converted to ${W}×${H}${shape ? ", with black bars on clips of a different shape" : ""}. This takes about as long as an export.`);
+  }
+}
+function setJoinProgress(label, p, right = "") {
+  $("jProgress").hidden = !label;
+  if (!label) return;
+  $("jStatus").textContent = label; $("jRight").textContent = right;
+  $("jFill").style.width = ((p || 0) * 100).toFixed(1) + "%";
+}
+
+$("joinBtn").onclick = () => state.joining ? state.joining.abort() : doJoin();
+async function doJoin() {
+  if (join.clips.length < 2 || busy()) return;
+  show("jErr", "");
+  const clips = join.clips.slice(), ac = new AbortController();
+  state.joining = ac; renderClips();
+  const wake = await navigator.wakeLock?.request("screen").catch(() => null);
+  const t0 = performance.now();
+  try {
+    const label = canCopy(clips) ? "Joining…" : "Joining and re-encoding…";
+    setJoinProgress(label, 0, "starting…");
+    const r = await joinClips({ clips, signal: ac.signal, onProgress: (p) => {
+      const el = (performance.now() - t0) / 1000;
+      setJoinProgress(label, p, p > 0.03 ? `${fmtTime(el / p - el)} left` : `${Math.floor(p * 100)}%`);
+    } });
+    const duration = r.offsets.at(-1) + clips.at(-1).duration;
+    const merged = mergeDocs(clips.map((c) => c.doc), clips, r.offsets, duration);
+    const first = clips[0].saved || {};
+    const seed = { doc: merged, captions: first.captions, audioFx: first.audioFx, reframe: first.reframe ? { ...first.reframe } : undefined };
+    if (merged || first.captions || first.audioFx || first.reframe) await putProject(projectKey(r.file), seed);
+    state.joining = null; state.joinedFile = r.file;
+    jdlg.close();
+    await loadFile(r.file);
+    const kept = clips.filter((c) => c.tx).length;
+    show("note", `Joined ${clips.length} clips into one ${fmtTime(duration)} video${r.mode === "copy" ? " without re-encoding" : ""}.` +
+      (merged ? ` Kept the transcript from ${kept === 1 ? "1 clip" : `${kept} clips`}${merged.limit < duration - 0.25 ? "; press Resume to transcribe the rest" : ""}.` : "") +
+      " Use “Save joined video” to keep a copy, so you can reopen this project later.");
+  } catch (e) {
+    if (e instanceof ExportCancelled) show("jErr", "Join cancelled.");
+    else { console.error(e); show("jErr", e.message || String(e)); }
+  } finally {
+    wake?.release?.().catch(() => {});
+    state.joining = null; setJoinProgress(""); renderClips();
+  }
+}
+
 async function renderEdit(ranges, signal, onProgress) {
   const [ow, oh] = outDims(), fmt = val("fmt"), res = val("res"), upscale = res !== "orig";
   if (state.captions.on && state.capCues.length) await loadCaptionFonts();

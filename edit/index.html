@@ -48,7 +48,7 @@
             <div class="inner">
               <div class="glyph"><svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.6"><path d="M10 13V3M6 7l4-4 4 4"/><path d="M3 13v2.5A1.5 1.5 0 0 0 4.5 17h11a1.5 1.5 0 0 0 1.5-1.5V13"/></svg></div>
               <div class="big">Open a video</div>
-              <div class="sub">Drop a file here or click to choose. MP4, MOV, WebM, MKV.</div>
+              <div class="sub">Drop a file here or click to choose. MP4, MOV, WebM, MKV.<br>Pick several to join them into one video.</div>
             </div>
           </div>
           <div class="loading" id="loading" hidden><div><div class="spin"></div><span id="loadingText">Reading video…</span></div></div>
@@ -63,10 +63,13 @@
         </div>
         <div class="strip-wrap"><canvas class="strip" id="strip" aria-label="Timeline. Removed parts are hatched. Click or drag to seek."></canvas></div>
         <div class="drop" id="drop">Drop to open video</div>
-        <input type="file" id="file" accept="video/*,.mkv,.mov,.webm,.mp4,.m4v,.ts" hidden>
+        <input type="file" id="file" accept="video/*,.mkv,.mov,.webm,.mp4,.m4v,.ts" multiple hidden>
+        <input type="file" id="clipFiles" accept="video/*,.mkv,.mov,.webm,.mp4,.m4v,.ts" multiple hidden>
       </section>
       <div class="filebar" id="filebar" hidden>
         <span class="name" id="fileName"></span>
+        <button class="linkbtn" id="saveJoinedBtn" type="button" hidden>Save joined video</button>
+        <button class="linkbtn" id="addClipsBtn" type="button">Add clips</button>
         <button class="linkbtn" id="changeBtn" type="button">Open another</button>
       </div>
       <div class="note" id="note" hidden></div>
@@ -360,6 +363,30 @@
       <button class="btn ghost" id="redoScenes" type="button">Start over</button>
     </div>
     <p class="help" id="scenesFoot" hidden>Each scene uses the size and format from Export, plus your cuts, captions, reframe and Studio voice. Your browser may ask once to allow several downloads.</p>
+  </div>
+</dialog>
+
+<dialog class="sheet join-sheet" id="joinDlg" aria-labelledby="joinTitle">
+  <div class="sheet-head">
+    <h2 id="joinTitle">Join clips</h2>
+    <button class="xbtn" id="joinClose" type="button" aria-label="Close"><svg viewBox="0 0 14 14" fill="none" stroke="currentColor" stroke-width="1.6"><path d="m3 3 8 8M11 3l-8 8"/></svg></button>
+  </div>
+  <div class="sheet-body">
+    <p class="help">The clips play in this order. Drag them, or use the arrows, to reorder.</p>
+    <ol class="clip-list" id="clipList"></ol>
+    <div class="clip-reading" id="clipReading" hidden><div class="spin"></div><span>Reading clips…</span></div>
+    <button class="btn ghost small" id="addMoreClips" type="button">Add videos</button>
+    <div class="join-mode" id="joinMode" hidden></div>
+    <div class="progress" id="jProgress" hidden>
+      <div class="track"><div class="fill" id="jFill"></div></div>
+      <div class="stats"><span id="jStatus">Joining…</span><span id="jRight"></span></div>
+    </div>
+    <div class="err" id="jErr" role="alert" hidden></div>
+    <div class="actions">
+      <button class="btn primary" id="joinBtn" type="button" disabled>Join clips</button>
+      <span class="join-total" id="joinTotal"></span>
+    </div>
+    <p class="help">Joining happens on this device. Transcripts and cuts you've already made in a clip are kept; Resume transcribes the rest.</p>
   </div>
 </dialog>
 

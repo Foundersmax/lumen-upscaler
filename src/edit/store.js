@@ -24,3 +24,19 @@ export const getProject = (key) => tx("readonly", (s) => s.get(key));
 export const putProject = (key, value) => tx("readwrite", (s) => s.put({ ...value, savedAt: Date.now() }, key));
 export const deleteProject = (key) => tx("readwrite", (s) => s.delete(key));
 export const projectKey = (file) => `${file.name}|${file.size}|${file.lastModified}`;
+
+/** The saved project for a file. A copy of the same file (same name and size, e.g. re-downloaded) has a
+ *  different modified time, so fall back to the newest project saved under that name and size. */
+export async function findProject(file) {
+  const exact = await getProject(projectKey(file));
+  if (exact) return exact;
+  const prefix = `${file.name}|${file.size}|`;
+  const keys = (await tx("readonly", (s) => s.getAllKeys())) || [];
+  let best = null;
+  for (const k of keys) {
+    if (typeof k !== "string" || !k.startsWith(prefix)) continue;
+    const p = await getProject(k);
+    if (p && (!best || (p.savedAt || 0) > (best.savedAt || 0))) best = p;
+  }
+  return best;
+}
