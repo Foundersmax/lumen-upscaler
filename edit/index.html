@@ -2,8 +2,8 @@
 <html lang="en">
 <head>
 <meta charset="utf-8">
-<!-- Enforced in the page itself because GitHub Pages can't send security headers: only this site, the speech-model host and (for optional sign-in) Google's account service and (for AI scene detection, with the user's own key) OpenAI may be contacted. -->
-<meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' 'wasm-unsafe-eval' https://apis.google.com; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src https://fonts.gstatic.com; img-src 'self' data: blob:; media-src 'self' blob:; worker-src 'self' blob:; connect-src 'self' blob: data: https://huggingface.co https://*.huggingface.co https://*.hf.co https://identitytoolkit.googleapis.com https://securetoken.googleapis.com https://api.openai.com; frame-src https://*.firebaseapp.com; object-src 'none'; base-uri 'self'">
+<!-- Enforced in the page itself because GitHub Pages can't send security headers: only this site, the speech-model host and (for optional sign-in) Google's account service and (for AI scenes and highlights, with the user's own key) Anthropic or OpenAI may be contacted. -->
+<meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' 'wasm-unsafe-eval' https://apis.google.com; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src https://fonts.gstatic.com; img-src 'self' data: blob:; media-src 'self' blob:; worker-src 'self' blob:; connect-src 'self' blob: data: https://huggingface.co https://*.huggingface.co https://*.hf.co https://identitytoolkit.googleapis.com https://securetoken.googleapis.com https://api.openai.com https://api.anthropic.com; frame-src https://*.firebaseapp.com; object-src 'none'; base-uri 'self'">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <title>Wetnix Editor</title>
 <meta name="description" content="Edit video by editing its transcript. On-device transcription, one-click pause and filler removal, private: files never leave your device.">
@@ -216,6 +216,8 @@
           <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5"><circle cx="7" cy="7" r="4.5"/><path d="m10.5 10.5 3 3"/></svg>Find</button>
         <button class="tool" id="scenesBtn" type="button" disabled title="Split into separate videos">
           <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5"><rect x="1.5" y="3" width="5.5" height="10" rx="1"/><rect x="9" y="3" width="5.5" height="10" rx="1"/></svg>Scenes</button>
+        <button class="tool" id="highlightsBtn" type="button" disabled title="Find the best moments as short clips">
+          <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round"><path d="m8 1.8 1.8 3.9 4.2.5-3.1 2.9.8 4.2L8 11.2l-3.7 2.1.8-4.2L2 6.2l4.2-.5z"/></svg>Highlights</button>
         <button class="tool" id="speakersBtn" type="button" disabled title="Label who is speaking">
           <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5"><circle cx="5.5" cy="5.5" r="2.2"/><path d="M1.8 13c.4-2.2 1.9-3.4 3.7-3.4S8.8 10.8 9.2 13"/><circle cx="11.2" cy="6.2" r="1.8"/><path d="M10.4 9.7c.3-.1.5-.1.8-.1 1.5 0 2.7 1 3 2.9"/></svg>Speakers</button>
         <span class="spacer"></span>
@@ -327,44 +329,104 @@
     <button class="xbtn" id="scenesClose" type="button" aria-label="Close"><svg viewBox="0 0 14 14" fill="none" stroke="currentColor" stroke-width="1.6"><path d="m3 3 8 8M11 3l-8 8"/></svg></button>
   </div>
   <div class="sheet-body">
-    <p class="help" id="scenesLead">Split this video into self-contained parts and export each one as its own video.</p>
-    <div class="scenes-setup" id="scenesSetup">
-      <div class="group">
-        <div class="label">How many scenes</div>
-        <div class="seg" role="radiogroup" aria-label="Number of scenes">
-          <input type="radio" name="scCount" id="scAuto" value="auto" checked><label for="scAuto">Auto<small>4–6</small></label>
-          <input type="radio" name="scCount" id="sc3" value="3"><label for="sc3">3</label>
-          <input type="radio" name="scCount" id="sc5" value="5"><label for="sc5">5</label>
-          <input type="radio" name="scCount" id="sc8" value="8"><label for="sc8">8</label>
+    <div class="seg sc-tabs" role="radiogroup" aria-label="What to make">
+      <input type="radio" name="scMode" id="scmHl" value="highlights"><label for="scmHl">Highlights<small>best moments</small></label>
+      <input type="radio" name="scMode" id="scmScenes" value="scenes" checked><label for="scmScenes">Scenes<small>whole video in parts</small></label>
+    </div>
+
+    <div id="scenesPane">
+      <p class="help" id="scenesLead">Split this video into self-contained parts and export each one as its own video.</p>
+      <div class="scenes-setup" id="scenesSetup">
+        <div class="group">
+          <div class="label">How many scenes</div>
+          <div class="seg" role="radiogroup" aria-label="Number of scenes">
+            <input type="radio" name="scCount" id="scAuto" value="auto" checked><label for="scAuto">Auto<small>4–6</small></label>
+            <input type="radio" name="scCount" id="sc3" value="3"><label for="sc3">3</label>
+            <input type="radio" name="scCount" id="sc5" value="5"><label for="sc5">5</label>
+            <input type="radio" name="scCount" id="sc8" value="8"><label for="sc8">8</label>
+          </div>
         </div>
+        <div class="actions">
+          <button class="btn primary" id="aiScenesBtn" type="button">Find scenes with AI</button>
+          <button class="btn ghost" id="pauseScenesBtn" type="button">Split at pauses</button>
+        </div>
+        <p class="help"><b>Find scenes with AI</b> sends the transcript text (not the video) to <span class="ai-name">Claude</span> using your own API key, and picks breaks where the topic changes. <b>Split at pauses</b> runs on this device and makes roughly equal parts.</p>
       </div>
-      <div class="actions">
-        <button class="btn primary" id="aiScenesBtn" type="button">Find scenes with AI</button>
-        <button class="btn ghost" id="pauseScenesBtn" type="button">Split at pauses</button>
+    </div>
+
+    <div id="hlPane" hidden>
+      <p class="help" id="hlLead">Find the moments that work on their own, ready to post as Shorts, Reels or TikToks.</p>
+      <div class="scenes-setup" id="hlSetup">
+        <div class="group">
+          <div class="label">How many</div>
+          <div class="seg" role="radiogroup" aria-label="Number of highlights">
+            <input type="radio" name="hlCount" id="hlcAuto" value="auto" checked><label for="hlcAuto">Auto<small>3–8</small></label>
+            <input type="radio" name="hlCount" id="hlc3" value="3"><label for="hlc3">3</label>
+            <input type="radio" name="hlCount" id="hlc5" value="5"><label for="hlc5">5</label>
+            <input type="radio" name="hlCount" id="hlc10" value="10"><label for="hlc10">10</label>
+          </div>
+        </div>
+        <div class="group">
+          <div class="label">Clip length</div>
+          <div class="seg" role="radiogroup" aria-label="Clip length">
+            <input type="radio" name="hlLen" id="hllShort" value="short"><label for="hllShort">Short<small>15–30 s</small></label>
+            <input type="radio" name="hlLen" id="hllMed" value="medium" checked><label for="hllMed">Medium<small>30–60 s</small></label>
+            <input type="radio" name="hlLen" id="hllLong" value="long"><label for="hllLong">Long<small>60–90 s</small></label>
+          </div>
+        </div>
+        <div class="actions">
+          <button class="btn primary" id="hlFind" type="button"><span>Find highlights with <span class="ai-name">Claude</span></span></button>
+        </div>
+        <p class="help"><span class="ai-name">Claude</span> reads the transcript text (not the video), using your own API key, and picks the clips most likely to hook a viewer: a strong opening, a clear payoff, no missing context.</p>
       </div>
-      <p class="help"><b>Find scenes with AI</b> sends the transcript text (not the video) to OpenAI using your own API key, and picks breaks where the topic changes. <b>Split at pauses</b> runs on this device and makes roughly equal parts.</p>
-      <details class="ai-settings" id="aiSettings">
-        <summary>OpenAI settings</summary>
-        <div class="ai-fields">
-          <label class="field" for="openaiKey"><span>API key</span><input id="openaiKey" type="password" autocomplete="off" spellcheck="false" placeholder="sk-…"></label>
+    </div>
+
+    <details class="ai-settings" id="aiSettings">
+      <summary>AI settings · <span id="aiSummary">Claude</span></summary>
+      <div class="ai-fields">
+        <div class="seg" role="radiogroup" aria-label="AI provider">
+          <input type="radio" name="aiProv" id="apClaude" value="claude" checked><label for="apClaude">Claude<small>Anthropic</small></label>
+          <input type="radio" name="aiProv" id="apOpenai" value="openai"><label for="apOpenai">OpenAI<small>GPT</small></label>
+        </div>
+        <div id="claudeFields">
+          <label class="field" for="claudeKey"><span>Anthropic API key</span><input id="claudeKey" type="password" autocomplete="off" spellcheck="false" placeholder="sk-ant-…"></label>
+          <label class="field" for="claudeModel"><span>Model</span><input id="claudeModel" type="text" autocomplete="off" spellcheck="false"></label>
+          <p class="help">Create a key at platform.claude.com → API keys. It's stored only in this browser and sent only to Anthropic. Finding highlights in a 1-hour video costs roughly 10–20 cents on the default model.</p>
+          <button class="linkbtn danger" id="claudeForget" type="button">Forget key</button>
+        </div>
+        <div id="openaiFields" hidden>
+          <label class="field" for="openaiKey"><span>OpenAI API key</span><input id="openaiKey" type="password" autocomplete="off" spellcheck="false" placeholder="sk-…"></label>
           <label class="field" for="openaiModel"><span>Model</span><input id="openaiModel" type="text" autocomplete="off" spellcheck="false"></label>
           <p class="help">Create a key at platform.openai.com → API keys. It's stored only in this browser and sent only to OpenAI. Each request costs a fraction of a cent for a 1-hour video on the default model.</p>
           <button class="linkbtn danger" id="openaiForget" type="button">Forget key</button>
         </div>
-      </details>
-    </div>
+      </div>
+    </details>
+
     <div class="progress" id="scProgress" hidden>
       <div class="track"><div class="fill" id="scFill"></div></div>
       <div class="stats"><span id="scStatus">Working…</span><span id="scRight"></span></div>
     </div>
     <div class="note" id="scNote" hidden></div>
     <div class="err" id="scErr" role="alert" hidden></div>
+
     <ol class="scene-list" id="sceneList"></ol>
     <div class="actions" id="sceneActions" hidden>
       <button class="btn primary" id="exportAllScenes" type="button">Export all scenes</button>
       <button class="btn ghost" id="redoScenes" type="button">Start over</button>
     </div>
     <p class="help" id="scenesFoot" hidden>Each scene uses the size and format from Export, plus your cuts, captions, reframe and Studio voice. Your browser may ask once to allow several downloads.</p>
+
+    <div class="hl-opts" id="hlOpts" hidden>
+      <label class="check"><input type="checkbox" id="hlVert" checked><span>Vertical 9:16 <span class="muted">· follows the face</span></span></label>
+      <label class="check"><input type="checkbox" id="hlCaps" checked><span>Captions <span class="muted" id="hlCapStyle"></span></span></label>
+    </div>
+    <ol class="scene-list" id="hlList"></ol>
+    <div class="actions" id="hlActions" hidden>
+      <button class="btn primary" id="hlExportAll" type="button">Export all highlights</button>
+      <button class="btn ghost" id="hlRedo" type="button">Start over</button>
+    </div>
+    <p class="help" id="hlFoot" hidden>Each clip keeps your cuts and Studio voice, and uses the size and format from Export. Your browser may ask once to allow several downloads.</p>
   </div>
 </dialog>
 

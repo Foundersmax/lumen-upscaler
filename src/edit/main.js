@@ -4,7 +4,9 @@ import { Doc, sanitizeWords, normWord, mapTime, cutAt, captionCues, toSRT, toTex
 import { analyzeBase, analyzeChain, chainKey, gainsFor } from "./enhance.js";
 import { ASPECTS, DEFAULT_REFRAME, cropGeometry, reframeSize, cropShortSide, trackFaces, buildPath, centerAt, cropAt } from "./reframe.js";
 import { DEFAULT_AUDIO, NOISE_LEVELS, VOICE_TONES } from "../audio/dsp.js";
-import { sentences, aiScenes, pauseScenes, buildScenes, sceneRanges, slug, DEFAULT_MODEL, AIError } from "./scenes.js";
+import { sentences, aiScenes, pauseScenes, buildScenes, sceneRanges, slug } from "./scenes.js";
+import { AIError, PROVIDERS } from "./ai.js";
+import { aiHighlights, buildHighlights, nudgeClip } from "./highlights.js";
 import { CAPTION_STYLES, CAPTION_COLORS, DEFAULT_CAPTIONS, buildCues, mapCues, rangeMapper, drawCaptions, loadCaptionFonts } from "./captions.js";
 import { extractAudio16k, peaks as computePeaks, ASR_RATE } from "./audio.js";
 import { exportEdit, ExportCancelled } from "./export.js";
@@ -25,7 +27,7 @@ const state = {
   captions: loadCaptionPrefs(), capCues: [],
   audioFx: loadAudioPrefs(), audioBase: null, chainLufs: {}, audioJob: null,
   reframe: { ...DEFAULT_REFRAME }, faceSamples: null, rfPath: null, rfJob: null,
-  scenes: [], sceneJob: null, playUntil: 0,
+  scenes: [], highlights: [], sceneJob: null, playUntil: 0,
   joining: null, joinedFile: null,
   speakers: null, spkJob: null, spkSig: "",
   transcribing: null, exporting: null, out: null, loadId: 0,
@@ -130,7 +132,7 @@ async function loadFile(file) {
       file, key: projectKey(file), input, atrack: audioOk ? at : null, duration,
       srcW: vt.displayWidth, srcH: vt.displayHeight,
       colorFix: !cs?.matrix && Math.min(vt.codedWidth, vt.codedHeight) < 720,
-      doc: null, cuts: [], kept: [[0, duration]], peaks: null, audio: null, undo: [], redo: [], nowIdx: -1, captions: loadCaptionPrefs(), capCues: [], audioFx: loadAudioPrefs(), audioBase: null, chainLufs: {}, reframe: { ...DEFAULT_REFRAME }, faceSamples: null, rfPath: null, scenes: [], speakers: null,
+      doc: null, cuts: [], kept: [[0, duration]], peaks: null, audio: null, undo: [], redo: [], nowIdx: -1, captions: loadCaptionPrefs(), capCues: [], audioFx: loadAudioPrefs(), audioBase: null, chainLufs: {}, reframe: { ...DEFAULT_REFRAME }, faceSamples: null, rfPath: null, scenes: [], highlights: [], speakers: null,
       url: URL.createObjectURL(file),
     });
     $("player").style.aspectRatio = `${state.srcW} / ${state.srcH}`;
@@ -153,8 +155,9 @@ async function loadFile(file) {
     if (saved?.reframe) state.reframe = { ...DEFAULT_REFRAME, ...saved.reframe };
     if (saved?.faceSamples) state.faceSamples = saved.faceSamples;
     if (Array.isArray(saved?.scenes)) state.scenes = saved.scenes;
+    if (Array.isArray(saved?.highlights)) state.highlights = saved.highlights;
     if (Array.isArray(saved?.speakers?.names)) state.speakers = saved.speakers;
-    renderScenes();
+    renderScenes(); renderHighlights();
     rebuildPath(); syncReframeUI(); applyFrame();
     if (needsTracking()) ensureTracking().catch(() => {});
     if (saved?.doc?.words?.length && Math.abs(saved.doc.duration - duration) < 0.5) {
@@ -374,7 +377,7 @@ function afterEdit(persist = true) {
   if (persist && state.key) {
     clearTimeout(persistTimer);
     $("saved").textContent = "Saving…";
-    const key = state.key, snapshot = { doc: doc ? doc.toJSON() : null, peaks: state.peaks, captions: state.captions, audioFx: state.audioFx, audioBase: state.audioBase, chainLufs: state.chainLufs, reframe: state.reframe, faceSamples: state.faceSamples, scenes: state.scenes, speakers: state.speakers };
+    const key = state.key, snapshot = { doc: doc ? doc.toJSON() : null, peaks: state.peaks, captions: state.captions, audioFx: state.audioFx, audioBase: state.audioBase, chainLufs: state.chainLufs, reframe: state.reframe, faceSamples: state.faceSamples, scenes: state.scenes, highlights: state.highlights, speakers: state.speakers };
     persistTimer = setTimeout(async () => {
       const ok = await putProject(key, snapshot);
       $("saved").textContent = ok === null ? "Not saved in this browser" : "Saved";
@@ -393,7 +396,7 @@ function updateStats() {
 function setToolsEnabled() {
   const has = !!state.doc && !busy();
   for (const id of ["trimBtn", "pauseLen", "fillerBtn", "restoreBtn", "findBtn"]) $(id).disabled = !has;
-  $("scenesBtn").disabled = !state.doc?.n || !!state.transcribing;
+  $("scenesBtn").disabled = $("highlightsBtn").disabled = !state.doc?.n || !!state.transcribing;
   $("speakersBtn").disabled = !state.doc?.n || !!state.transcribing;
   $("undoBtn").disabled = !has || !state.undo.length;
   $("redoBtn").disabled = !has || !state.redo.length;
@@ -804,8 +807,8 @@ function setupCaptionDrag() {
 }
 new ResizeObserver(() => drawCapOverlay()).observe($("capCanvas"));
 /** For the exporter: maps cues through the final ranges and returns the per-frame draw function. */
-function captionOverlay() {
-  if (!state.captions.on || !state.capCues.length) return null;
+function captionOverlay(on = state.captions.on) {
+  if (!on || !state.capCues.length) return null;
   const opts = { ...state.captions }, cues = state.capCues;
   return (ranges) => {
     // only captions inside the exported span (a scene exports part of the video)
@@ -818,7 +821,7 @@ function captionOverlay() {
 /* =====================================================================
    Reframe (vertical / square, follows the face)
    ===================================================================== */
-const needsTracking = () => !!state.file && state.reframe.aspect !== "orig" && state.reframe.follow === "face" && !state.faceSamples;
+const needsTracking = (aspect = state.reframe.aspect) => !!state.file && aspect !== "orig" && state.reframe.follow === "face" && !state.faceSamples;
 function rebuildPath() {
   state.rfPath = state.faceSamples && state.reframe.aspect !== "orig" ? buildPath(state.faceSamples, state.srcW, state.srcH, state.reframe.aspect) : null;
 }
@@ -869,8 +872,8 @@ function updateVideoCrop() {
   const px = w < 1 ? (x / (1 - w)) * 100 : 50, py = h < 1 ? (y / (1 - h)) * 100 : 50;
   video.style.objectPosition = `${px.toFixed(3)}% ${py.toFixed(3)}%`;
 }
-async function ensureTracking() {
-  if (!needsTracking()) return;
+async function ensureTracking(aspect) {
+  if (!needsTracking(aspect)) return;
   if (!state.rfJob) {
     const ac = new AbortController(), key = state.key;
     const job = { abort: () => ac.abort() };
@@ -1018,19 +1021,71 @@ video.addEventListener("play", () => { if (audioCtx && audioCtx.state === "suspe
 }
 
 /* =====================================================================
-   Scenes: split into separate videos
+   Scenes and Highlights: separate videos from one long one
    ===================================================================== */
 const scDlg = $("scenesDlg");
-$("scenesBtn").onclick = () => { if (!state.doc?.n) return; pause(); syncScenesUI(); scDlg.showModal(); };
+function openScenes(mode) {
+  if (!state.doc?.n) return;
+  pause(); setScMode(mode); syncScenesUI(); syncHlUI(); scDlg.showModal();
+}
+$("scenesBtn").onclick = () => openScenes("scenes");
+$("highlightsBtn").onclick = () => openScenes("highlights");
 $("scenesClose").onclick = () => scDlg.close();
 scDlg.addEventListener("click", (e) => { if (e.target === scDlg) scDlg.close(); });
-$("openaiKey").value = store.get("openaiKey", "");
-$("openaiModel").value = store.get("openaiModel", DEFAULT_MODEL);
-$("openaiKey").addEventListener("change", () => store.set("openaiKey", $("openaiKey").value.trim()));
-$("openaiModel").addEventListener("change", () => store.set("openaiModel", $("openaiModel").value.trim() || DEFAULT_MODEL));
-$("openaiForget").onclick = () => { $("openaiKey").value = ""; try { localStorage.removeItem("lumen.openaiKey"); } catch {} show("scNote", "Your OpenAI key was removed from this browser."); };
-{ const saved = store.get("scCount"); const el = saved && document.querySelector(`input[name="scCount"][value="${saved}"]`); if (el) el.checked = true; }
-for (const r of document.querySelectorAll('input[name="scCount"]')) r.addEventListener("change", () => store.set("scCount", r.value));
+function setScMode(mode) {
+  for (const r of document.querySelectorAll('input[name="scMode"]')) r.checked = r.value === mode;
+  $("scenesPane").hidden = mode !== "scenes"; $("hlPane").hidden = mode !== "highlights";
+  $("scenesTitle").textContent = mode === "scenes" ? "Scenes" : "Highlights";
+  show("scNote", ""); show("scErr", "");
+  syncScenesUI(); syncHlUI();
+}
+for (const r of document.querySelectorAll('input[name="scMode"]')) r.addEventListener("change", () => setScMode(r.value));
+const scMode = () => val("scMode");
+
+// AI provider and keys (stored only in this browser)
+const AI_FIELDS = { claude: ["claudeKey", "claudeModel"], openai: ["openaiKey", "openaiModel"] };
+for (const [prov, [k, m]] of Object.entries(AI_FIELDS)) {
+  $(k).value = store.get(k, ""); $(m).value = store.get(m, PROVIDERS[prov].model);
+  $(k).addEventListener("change", () => store.set(k, $(k).value.trim()));
+  $(m).addEventListener("change", () => { $(m).value = $(m).value.trim() || PROVIDERS[prov].model; store.set(m, $(m).value); });
+}
+for (const [prov, id] of [["claude", "claudeForget"], ["openai", "openaiForget"]]) {
+  $(id).onclick = () => { $(AI_FIELDS[prov][0]).value = ""; try { localStorage.removeItem("lumen." + AI_FIELDS[prov][0]); } catch {} show("scNote", `Your ${PROVIDERS[prov].name} key was removed from this browser.`); };
+}
+{ // default to Claude, unless only an OpenAI key was saved before Claude was an option
+  const saved = store.get("aiProvider") || (store.get("openaiKey") && !store.get("claudeKey") ? "openai" : "claude");
+  const el = document.querySelector(`input[name="aiProv"][value="${saved}"]`); if (el) el.checked = true;
+}
+const aiProvider = () => val("aiProv") || "claude";
+function syncProvider() {
+  const p = aiProvider();
+  $("claudeFields").hidden = p !== "claude"; $("openaiFields").hidden = p !== "openai";
+  $("aiSummary").textContent = PROVIDERS[p].name + ($(AI_FIELDS[p][0]).value.trim() ? "" : " · add your key");
+  for (const el of document.querySelectorAll(".ai-name")) el.textContent = PROVIDERS[p].name;
+}
+for (const r of document.querySelectorAll('input[name="aiProv"]')) r.addEventListener("change", () => { store.set("aiProvider", r.value); syncProvider(); });
+for (const id of ["claudeKey", "openaiKey"]) $(id).addEventListener("input", syncProvider);
+syncProvider();
+/** The chosen provider's key and model, or null (after pointing the user at the key field). */
+function aiAuth() {
+  const provider = aiProvider(), [k, m] = AI_FIELDS[provider], key = $(k).value.trim();
+  if (!key) {
+    $("aiSettings").open = true; $(k).focus();
+    show("scErr", `Add your ${PROVIDERS[provider].company} API key first (it stays in this browser).`);
+    return null;
+  }
+  store.set(k, key);
+  return { provider, key, model: $(m).value.trim() || PROVIDERS[provider].model, url: provider === "claude" ? globalThis.__wetnixClaudeUrl : globalThis.__wetnixOpenAIUrl };
+}
+
+for (const name of ["scCount", "hlCount", "hlLen"]) {
+  const saved = store.get(name); const el = saved && document.querySelector(`input[name="${name}"][value="${saved}"]`); if (el) el.checked = true;
+  for (const r of document.querySelectorAll(`input[name="${name}"]`)) r.addEventListener("change", () => store.set(name, r.value));
+}
+for (const id of ["hlVert", "hlCaps"]) {
+  const saved = store.get(id); if (saved != null) $(id).checked = saved === "1";
+  $(id).addEventListener("change", () => store.set(id, $(id).checked ? "1" : "0"));
+}
 
 function setSceneProgress(text, p = null, right = "") {
   $("scProgress").hidden = !text;
@@ -1040,16 +1095,18 @@ function setSceneProgress(text, p = null, right = "") {
   $("scFill").classList.toggle("indeterminate", p == null);
 }
 function syncScenesUI() {
-  const has = state.scenes.length > 0, job = !!state.sceneJob, exporting = !!state.exporting;
+  const on = scMode() === "scenes", has = state.scenes.length > 0, job = !!state.sceneJob, exporting = !!state.exporting;
   $("scenesSetup").hidden = has;
-  $("sceneActions").hidden = !has; $("scenesFoot").hidden = !has;
+  $("sceneList").hidden = !on; $("sceneActions").hidden = !on || !has; $("scenesFoot").hidden = !on || !has;
+  $("aiSettings").hidden = on ? has : state.highlights.length > 0;
   $("scenesLead").textContent = has ? `${state.scenes.length} scenes. Rename them here; the titles become the file names.` : "Split this video into self-contained parts and export each one as its own video.";
   $("aiScenesBtn").disabled = $("pauseScenesBtn").disabled = job || exporting;
   $("redoScenes").disabled = job || exporting;
-  $("exportAllScenes").textContent = state.sceneExport ? "Cancel" : `Export all ${state.scenes.length} scenes`;
-  $("exportAllScenes").classList.toggle("primary", !state.sceneExport); $("exportAllScenes").classList.toggle("ghost", !!state.sceneExport);
-  $("exportAllScenes").disabled = !state.sceneExport && (job || exporting);
+  $("exportAllScenes").textContent = state.sceneExport === "scenes" ? "Cancel" : `Export all ${state.scenes.length} scenes`;
+  $("exportAllScenes").classList.toggle("primary", state.sceneExport !== "scenes"); $("exportAllScenes").classList.toggle("ghost", state.sceneExport === "scenes");
+  $("exportAllScenes").disabled = state.sceneExport !== "scenes" && (job || exporting);
   for (const b of $("sceneList").querySelectorAll(".scene-export")) b.disabled = job || exporting;
+  for (const el of document.querySelectorAll('input[name="scMode"]')) el.disabled = job || exporting;
 }
 
 async function findScenes(useAI) {
@@ -1063,25 +1120,36 @@ async function findScenes(useAI) {
     afterScenes(`Split into ${state.scenes.length} parts at natural pauses.`);
     return;
   }
-  const key = $("openaiKey").value.trim();
-  if (!key) { $("aiSettings").open = true; $("openaiKey").focus(); show("scErr", "Add your OpenAI API key first (it stays in this browser)."); return; }
-  store.set("openaiKey", key);
-  const ac = new AbortController(); state.sceneJob = ac; syncScenesUI();
-  setSceneProgress("Asking OpenAI to find the scenes…");
+  const auth = aiAuth(); if (!auth) return;
+  const ac = new AbortController(); state.sceneJob = ac; syncScenesUI(); syncHlUI();
+  setSceneProgress(`Asking ${PROVIDERS[auth.provider].name} to find the scenes…`);
   try {
-    const picks = await aiScenes({ key, model: $("openaiModel").value.trim() || DEFAULT_MODEL, sents, duration, count, signal: ac.signal, url: globalThis.__wetnixOpenAIUrl, names: spkNames() });
+    const picks = await aiScenes({ ...auth, sents, duration, count, signal: ac.signal, names: spkNames() });
     state.scenes = buildScenes(sents, picks, duration);
     afterScenes(`Found ${state.scenes.length} scenes.`);
   } catch (e) {
     if (e?.name !== "AbortError") { console.error(e); show("scErr", e instanceof AIError ? e.message : friendly(e)); }
   } finally {
-    state.sceneJob = null; setSceneProgress(""); syncScenesUI();
+    state.sceneJob = null; setSceneProgress(""); syncScenesUI(); syncHlUI();
   }
 }
 function afterScenes(note) { renderScenes(); show("scNote", note); afterEdit(); }
 $("aiScenesBtn").onclick = () => findScenes(true);
 $("pauseScenesBtn").onclick = () => findScenes(false);
 $("redoScenes").onclick = () => { state.scenes = []; renderScenes(); show("scNote", ""); show("scErr", ""); afterEdit(); };
+
+/** Seconds of a clip that are still in the edit. */
+const keptIn = (clip) => sceneRanges(state.kept, clip).reduce((s, [a, b]) => s + b - a, 0);
+function playClip(clip) { scDlg.close(); seek(clip.start); state.followUntil = 0; play(); state.playUntil = clip.end; }
+function clipButtons(clip, onExport, cls) {
+  const btns = document.createElement("div"); btns.className = "scene-btns";
+  const playB = document.createElement("button"); playB.type = "button"; playB.className = "tool scene-play"; playB.textContent = "Play";
+  playB.onclick = () => playClip(clip);
+  const expB = document.createElement("button"); expB.type = "button"; expB.className = `tool ${cls}`; expB.textContent = "Export";
+  expB.onclick = onExport;
+  btns.append(playB, expB);
+  return btns;
+}
 
 function renderScenes() {
   const list = $("sceneList"); list.textContent = "";
@@ -1092,60 +1160,144 @@ function renderScenes() {
     const title = document.createElement("input"); title.className = "scene-title"; title.value = sc.title; title.maxLength = 80; title.setAttribute("aria-label", `Title of scene ${i + 1}`);
     title.addEventListener("change", () => { sc.title = title.value.trim() || `Part ${i + 1}`; title.value = sc.title; afterEdit(); });
     const chip = document.createElement("span"); chip.className = "chip";
-    const kept = sceneRanges(state.kept, sc).reduce((s, [a, b]) => s + b - a, 0);
-    chip.textContent = `${fmtTime(sc.start)}–${fmtTime(sc.end)} · ${fmtTime(kept)}`;
+    chip.textContent = `${fmtTime(sc.start)}–${fmtTime(sc.end)} · ${fmtTime(keptIn(sc))}`;
     head.append(n, title, chip);
     li.append(head);
     if (sc.summary) { const p = document.createElement("p"); p.className = "scene-sum"; p.textContent = sc.summary; li.append(p); }
-    const btns = document.createElement("div"); btns.className = "scene-btns";
-    const playB = document.createElement("button"); playB.type = "button"; playB.className = "tool scene-play"; playB.textContent = "Play";
-    playB.onclick = () => { scDlg.close(); seek(sc.start); state.followUntil = 0; play(); state.playUntil = sc.end; };
-    const expB = document.createElement("button"); expB.type = "button"; expB.className = "tool scene-export"; expB.textContent = "Export";
-    expB.onclick = () => exportScenes([i]);
-    btns.append(playB, expB); li.append(btns);
+    li.append(clipButtons(sc, () => exportClips("scenes", [i]), "scene-export"));
     list.append(li);
   });
   syncScenesUI();
 }
 
-$("exportAllScenes").onclick = () => state.sceneExport ? state.exporting?.abort() : exportScenes(state.scenes.map((_, i) => i));
+$("exportAllScenes").onclick = () => state.sceneExport ? state.exporting?.abort() : exportClips("scenes", state.scenes.map((_, i) => i));
 
-async function exportScenes(indices) {
+/* ---------- Highlights ---------- */
+function syncHlUI() {
+  const on = scMode() === "highlights", has = state.highlights.length > 0, job = !!state.sceneJob, exporting = !!state.exporting;
+  $("hlSetup").hidden = has;
+  $("hlList").hidden = !on; $("hlOpts").hidden = !on || !has; $("hlActions").hidden = !on || !has; $("hlFoot").hidden = !on || !has;
+  if (on) $("aiSettings").hidden = has;
+  $("hlLead").textContent = has ? `${state.highlights.length} highlight${state.highlights.length === 1 ? "" : "s"}, best first. Rename, trim or play them, then export.`
+    : "Find the moments that work on their own, ready to post as Shorts, Reels or TikToks.";
+  $("hlFind").disabled = job || exporting; $("hlRedo").disabled = job || exporting;
+  $("hlExportAll").textContent = state.sceneExport === "highlights" ? "Cancel" : `Export all ${state.highlights.length} highlight${state.highlights.length === 1 ? "" : "s"}`;
+  $("hlExportAll").classList.toggle("primary", state.sceneExport !== "highlights"); $("hlExportAll").classList.toggle("ghost", state.sceneExport === "highlights");
+  $("hlExportAll").disabled = state.sceneExport !== "highlights" && (job || exporting);
+  for (const b of $("hlList").querySelectorAll(".hl-export, .hl-trim .tool")) b.disabled = job || exporting;
+  $("hlVert").disabled = $("hlCaps").disabled = exporting;
+  $("hlCapStyle").textContent = `· ${CAPTION_STYLES[state.captions.style]?.name || ""}`;
+}
+
+async function findHighlights() {
+  if (!state.doc?.n || state.sceneJob) return;
+  show("scErr", ""); show("scNote", "");
+  const sents = sentences(state.doc);
+  if (!sents.length) { show("scErr", "Everything is cut, so there's nothing to pick from."); return; }
+  const auth = aiAuth(); if (!auth) return;
+  const count = val("hlCount"), length = val("hlLen"), duration = state.duration;
+  const ac = new AbortController(); state.sceneJob = ac; syncScenesUI(); syncHlUI();
+  setSceneProgress(`${PROVIDERS[auth.provider].name} is watching for the best moments…`, null, "usually under a minute");
+  try {
+    const picks = await aiHighlights({ ...auth, sents, duration, count, length, signal: ac.signal, names: spkNames() });
+    state.highlights = buildHighlights(sents, picks, duration, length, count === "auto" ? 8 : +count);
+    if (!state.highlights.length) throw new AIError("None of the suggested clips matched the transcript. Try again.");
+    renderHighlights(); afterEdit();
+    const fewer = count !== "auto" && state.highlights.length < +count;
+    show("scNote", `Found ${state.highlights.length} highlight${state.highlights.length === 1 ? "" : "s"}.` + (fewer ? " That's all the strong moments in this video." : ""));
+  } catch (e) {
+    if (e?.name !== "AbortError") { console.error(e); show("scErr", e instanceof AIError ? e.message : friendly(e)); }
+  } finally {
+    state.sceneJob = null; setSceneProgress(""); syncScenesUI(); syncHlUI();
+  }
+}
+$("hlFind").onclick = findHighlights;
+$("hlRedo").onclick = () => { state.highlights = []; renderHighlights(); show("scNote", ""); show("scErr", ""); afterEdit(); };
+$("hlExportAll").onclick = () => state.sceneExport ? state.exporting?.abort() : exportClips("highlights", state.highlights.map((_, i) => i));
+
+function trimHighlight(i, edge, dir) {
+  const h = state.highlights[i], next = nudgeClip(sentences(state.doc), h, edge, dir, state.duration);
+  if (!next) { show("scNote", edge === "start" ? "The start can't move further that way." : "The end can't move further that way."); return; }
+  Object.assign(h, next); show("scNote", "");
+  renderHighlights(); afterEdit();
+  $("hlList").querySelector(`[data-i="${i}"] [data-trim="${edge}${dir}"]`)?.focus();
+}
+
+function renderHighlights() {
+  const list = $("hlList"); list.textContent = "";
+  state.highlights.forEach((h, i) => {
+    const li = document.createElement("li"); li.className = "scene"; li.dataset.i = i;
+    const head = document.createElement("div"); head.className = "scene-head";
+    const n = document.createElement("span"); n.className = "scene-n"; n.textContent = i + 1;
+    const title = document.createElement("input"); title.className = "scene-title"; title.value = h.title; title.maxLength = 80; title.setAttribute("aria-label", `Title of highlight ${i + 1}`);
+    title.addEventListener("change", () => { h.title = title.value.trim() || `Highlight ${i + 1}`; title.value = h.title; afterEdit(); });
+    const score = document.createElement("span"); score.className = "hl-score" + (h.score >= 8 ? " hi" : ""); score.textContent = `${h.score}/10`;
+    score.title = "How likely the clip is to hold a viewer, according to the AI";
+    const chip = document.createElement("span"); chip.className = "chip";
+    const kept = keptIn(h);
+    chip.textContent = `${fmtTime(h.start)} · ${fmtTime(kept)}${kept < h.end - h.start - 0.3 ? " after cuts" : ""}`;
+    head.append(n, title, score, chip);
+    li.append(head);
+    if (h.reason) { const p = document.createElement("p"); p.className = "scene-sum"; p.textContent = h.reason; li.append(p); }
+    const btns = clipButtons(h, () => exportClips("highlights", [i]), "hl-export");
+    const trim = document.createElement("div"); trim.className = "hl-trim";
+    for (const [edge, label] of [["start", "Start"], ["end", "End"]]) {
+      const s = document.createElement("span"); s.textContent = label; trim.append(s);
+      for (const dir of [-1, 1]) {
+        const b = document.createElement("button"); b.type = "button"; b.className = "tool"; b.dataset.trim = `${edge}${dir}`;
+        b.textContent = dir < 0 ? "−" : "+";
+        b.setAttribute("aria-label", `${label} of highlight ${i + 1}: ${dir < 0 ? "one sentence earlier" : "one sentence later"}`);
+        b.title = dir < 0 ? "One sentence earlier" : "One sentence later";
+        b.onclick = () => trimHighlight(i, edge, dir);
+        trim.append(b);
+      }
+    }
+    btns.append(trim); li.append(btns);
+    list.append(li);
+  });
+  syncHlUI();
+}
+
+/** Exports scenes or highlights one after another, each as its own file. */
+async function exportClips(kind, indices) {
   if (!state.file || busy() || !indices.length) return;
+  const clips = kind === "scenes" ? state.scenes : state.highlights, list = $(kind === "scenes" ? "sceneList" : "hlList");
+  const noun = kind === "scenes" ? "scene" : "highlight";
+  const opts = kind === "highlights" ? { aspect: $("hlVert").checked ? "9:16" : state.reframe.aspect, captions: $("hlCaps").checked } : {};
   show("scErr", ""); show("scNote", ""); pause();
-  const ac = new AbortController(); state.exporting = ac; state.sceneExport = true;
-  setExporting(true); syncScenesUI();
+  const ac = new AbortController(); state.exporting = ac; state.sceneExport = kind;
+  setExporting(true); syncScenesUI(); syncHlUI();
   const wake = await navigator.wakeLock?.request("screen").catch(() => null);
   let done = 0, skipped = 0;
   try {
     for (let k = 0; k < indices.length; k++) {
-      const i = indices[k], sc = state.scenes[i];
-      for (const li of $("sceneList").children) li.classList.toggle("active", +li.dataset.i === i);
+      const i = indices[k], sc = clips[i];
+      for (const li of list.children) li.classList.toggle("active", +li.dataset.i === i);
       const ranges = sceneRanges(state.kept, sc);
       if (!ranges.length) { skipped++; continue; }
-      const label = indices.length > 1 ? `Exporting scene ${i + 1} (${k + 1} of ${indices.length})` : `Exporting scene ${i + 1}`;
+      const label = indices.length > 1 ? `Exporting ${noun} ${i + 1} (${k + 1} of ${indices.length})` : `Exporting ${noun} ${i + 1}`;
       setSceneProgress(label, 0, "starting…");
       const t0 = performance.now();
       const r = await renderEdit(ranges, ac.signal, (p, { status }) => {
         if (status) { setSceneProgress(label, 0, status); return; }
         const el = (performance.now() - t0) / 1000;
         setSceneProgress(label, p, p > 0.02 ? `${fmtTime(el / p - el)} left` : `${Math.floor(p * 100)}%`);
-        $("exportOpen").textContent = `Scene ${k + 1}/${indices.length} · ${Math.floor(p * 100)}%`;
-      });
-      const name = `${fileBase()}_${String(i + 1).padStart(2, "0")}_${slug(sc.title)}.${r.fmt}`;
+        $("exportOpen").textContent = `${kind === "scenes" ? "Scene" : "Clip"} ${k + 1}/${indices.length} · ${Math.floor(p * 100)}%`;
+      }, opts);
+      const name = `${fileBase()}_${kind === "highlights" ? "highlight-" : ""}${String(i + 1).padStart(2, "0")}_${slug(sc.title)}.${r.fmt}`;
       await saveBlob(r.blob, name);
       done++;
       if (r.audioNote) show("scErr", r.audioNote);
     }
-    show("scNote", `Exported ${done} scene${done === 1 ? "" : "s"}.` + (skipped ? ` ${skipped} skipped because everything in ${skipped === 1 ? "it is" : "them is"} cut.` : ""));
+    show("scNote", `Exported ${done} ${noun}${done === 1 ? "" : "s"}.` + (skipped ? ` ${skipped} skipped because everything in ${skipped === 1 ? "it is" : "them is"} cut.` : ""));
   } catch (e) {
-    if (e instanceof ExportCancelled) show("scNote", `Export cancelled${done ? ` after ${done} scene${done === 1 ? "" : "s"}` : ""}.`);
+    if (e instanceof ExportCancelled) show("scNote", `Export cancelled${done ? ` after ${done} ${noun}${done === 1 ? "" : "s"}` : ""}.`);
     else { console.error(e); show("scErr", friendly(e)); }
   } finally {
     wake?.release?.().catch(() => {});
-    for (const li of $("sceneList").children) li.classList.remove("active");
+    for (const li of list.children) li.classList.remove("active");
     state.exporting = null; state.sceneExport = false; setSceneProgress("");
-    setExporting(false); $("exportOpen").textContent = "Export"; syncScenesUI();
+    setExporting(false); $("exportOpen").textContent = "Export"; syncScenesUI(); syncHlUI();
   }
 }
 
@@ -1180,9 +1332,9 @@ $("exportOpen").onclick = () => { if (!state.file) return; pause(); updateResOpt
 $("exportClose").onclick = () => dlg.close();
 dlg.addEventListener("click", (e) => { if (e.target === dlg) dlg.close(); }); // click on backdrop
 
-function outDims() {
+function outDims(aspect = state.reframe.aspect) {
   const res = val("res");
-  if (state.reframe.aspect !== "orig" && state.srcW) return reframeSize(state.srcW, state.srcH, state.reframe.aspect, res);
+  if (aspect !== "orig" && state.srcW) return reframeSize(state.srcW, state.srcH, aspect, res);
   if (res === "orig" || !state.srcW) return [even(state.srcW), even(state.srcH)];
   return targetSize(state.srcW, state.srcH, res).slice(0, 2);
 }
@@ -1620,11 +1772,12 @@ script.addEventListener("scroll", () => { if (!spkMenu.hidden) closeSpkMenu(); }
 $("selSpk").onmousedown = (e) => e.preventDefault(); // keep the text selection
 $("selSpk").onclick = () => { const t = selectedTokens(); if (!t?.words.length) return; openSpkMenu($("selSpk"), t.words[0], t.words.at(-1)); };
 
-async function renderEdit(ranges, signal, onProgress) {
-  const [ow, oh] = outDims(), fmt = val("fmt"), res = val("res"), upscale = res !== "orig";
-  if (state.captions.on && state.capCues.length) await loadCaptionFonts();
-  if (needsTracking()) { onProgress?.(0, { frames: 0, status: "finding faces…" }); await ensureTracking(); }
-  const rf = { ...state.reframe }, rfPath = state.rfPath, srcW = state.srcW, srcH = state.srcH;
+async function renderEdit(ranges, signal, onProgress, { aspect = state.reframe.aspect, captions = state.captions.on } = {}) {
+  const [ow, oh] = outDims(aspect), fmt = val("fmt"), res = val("res"), upscale = res !== "orig";
+  if (captions && state.capCues.length) await loadCaptionFonts();
+  if (needsTracking(aspect)) { onProgress?.(0, { frames: 0, status: "finding faces…" }); await ensureTracking(aspect); }
+  const rf = { ...state.reframe, aspect }, srcW = state.srcW, srcH = state.srcH;
+  const rfPath = aspect === state.reframe.aspect ? state.rfPath : state.faceSamples && aspect !== "orig" ? buildPath(state.faceSamples, srcW, srcH, aspect) : null;
   const cropFn = rf.aspect !== "orig" ? (t) => cropAt(rf, rfPath, srcW, srcH, t) : null;
   let audioFx = null;
   if (state.audioFx.on && state.atrack) {
@@ -1632,7 +1785,7 @@ async function renderEdit(ranges, signal, onProgress) {
     const g = await ensureAudio(signal);
     audioFx = { settings: { ...state.audioFx }, profile: state.audioBase.profile, pre: g.pre, post: g.post };
   }
-  const out = await exportEdit({ file: state.file, ranges, fmt, ow, oh, quality: QUALITY.high, sharp: upscale ? 0.5 : 0, colorFix: state.colorFix, signal, overlay: captionOverlay(), audioFx, cropAt: cropFn, onProgress });
+  const out = await exportEdit({ file: state.file, ranges, fmt, ow, oh, quality: QUALITY.high, sharp: upscale ? 0.5 : 0, colorFix: state.colorFix, signal, overlay: captionOverlay(captions), audioFx, cropAt: cropFn, onProgress });
   return { ...out, ow, oh, fmt, res, upscale, total: ranges.reduce((s, [a, b]) => s + b - a, 0) };
 }
 const fileBase = () => state.file.name.replace(/\.[^.]+$/, "").replace(/[\\/:*?"<>|]+/g, "_").slice(0, 120) || "video";

@@ -1,10 +1,11 @@
 // Scenes: split a long video into a few self-contained parts.
-//   aiScenes():    OpenAI picks topic boundaries from the transcript (text only; the video never leaves the device)
+//   aiScenes():    Claude or OpenAI picks topic boundaries from the transcript (text only; the video never leaves the device)
 //   pauseScenes(): on-device fallback, roughly equal parts cut at the longest nearby pauses
 // Both return start points at sentence boundaries; buildScenes() turns them into clean time ranges.
 
-export const OPENAI_URL = "https://api.openai.com/v1/chat/completions";
-export const DEFAULT_MODEL = "gpt-4.1-mini";
+import { askJSON, AIError, PROVIDERS, OPENAI_URL } from "./ai.js";
+export { AIError, OPENAI_URL };
+export const DEFAULT_MODEL = PROVIDERS.openai.model;
 const MIN_SCENE = 20; // seconds; shorter parts are merged into a neighbour
 
 /** Transcript as sentences of kept (not cut) words: [{s, e, text}], in order. */
@@ -23,7 +24,7 @@ export function sentences(doc) {
   return out.map(({ s, e, text, sp }) => ({ s, e, text, sp }));
 }
 
-const mmss = (t) => { t = Math.max(0, Math.floor(t)); const h = Math.floor(t / 3600), m = Math.floor(t / 60) % 60, s = t % 60; return (h ? `${h}:${String(m).padStart(2, "0")}` : `${m}`) + `:${String(s).padStart(2, "0")}`; };
+export const mmss = (t) => { t = Math.max(0, Math.floor(t)); const h = Math.floor(t / 3600), m = Math.floor(t / 60) % 60, s = t % 60; return (h ? `${h}:${String(m).padStart(2, "0")}` : `${m}`) + `:${String(s).padStart(2, "0")}`; };
 
 /** "[index] m:ss text" lines, trimmed to a character budget so very long videos still fit one request. */
 export function transcriptLines(sents, budget = 120000, names = null) {
@@ -49,46 +50,18 @@ const SCHEMA = {
   },
 };
 
-export class AIError extends Error {}
-
 /**
- * Asks OpenAI for scene boundaries. Sends only transcript text and timestamps.
+ * Asks Claude or OpenAI for scene boundaries. Sends only transcript text and timestamps.
  * @returns {Promise<{start_index:number,title:string,summary:string}[]>}
  */
-export async function aiScenes({ key, model = DEFAULT_MODEL, sents, duration, count, signal, url = OPENAI_URL, names = null }) {
-  if (!key) throw new AIError("Add your OpenAI API key first.");
+export async function aiScenes({ provider = "openai", key, model, sents, duration, count, signal, url, names = null }) {
   const want = count === "auto" ? "between 4 and 6 scenes (fewer for short videos)" : `exactly ${count} scenes`;
-  const body = {
-    model,
-    messages: [
-      { role: "system", content: "You split long video transcripts into self-contained scenes for separate short videos. Each scene must cover one topic or segment and make sense on its own. Scenes are contiguous and together cover the whole video. Choose boundaries where the topic changes, never mid-thought. Write titles and summaries in the transcript's language." },
-      { role: "user", content: `Video length: ${mmss(duration)}. Split it into ${want}. The first scene starts at sentence 0. Return each scene's starting sentence index, a title and a one-sentence summary.\n\nTranscript (one sentence per line: [index] start time, ${names ? "speaker: " : ""}text):\n${transcriptLines(sents, 120000, names)}` },
-    ],
-    response_format: { type: "json_schema", json_schema: { name: "scenes", strict: true, schema: SCHEMA } },
-  };
-  let res;
-  try {
-    res = await fetch(url, { method: "POST", signal, headers: { "Content-Type": "application/json", Authorization: `Bearer ${key}` }, body: JSON.stringify(body) });
-  } catch (e) {
-    if (e?.name === "AbortError") throw e;
-    throw new AIError("Couldn't reach OpenAI. Check your connection and try again.");
-  }
-  let data = null;
-  try { data = await res.json(); } catch {}
-  if (!res.ok) {
-    const code = data?.error?.code || "", msg = data?.error?.message || "";
-    if (res.status === 401) throw new AIError("OpenAI didn't accept the API key. Check it and try again.");
-    if (res.status === 429 && /quota|billing/i.test(code + msg)) throw new AIError("Your OpenAI account is out of credit. Add billing at platform.openai.com, then try again.");
-    if (res.status === 429) throw new AIError("OpenAI is rate-limiting requests. Wait a minute, then try again.");
-    if (res.status === 404 || code === "model_not_found") throw new AIError(`The model "${model}" isn't available to your OpenAI account. Choose another model in the settings.`);
-    if (res.status === 400 && /context|too long|maximum/i.test(msg)) throw new AIError("The transcript is too long for this model. Choose a model with a larger context window.");
-    throw new AIError(`OpenAI returned an error (${res.status}${msg ? `: ${msg.slice(0, 140)}` : ""}).`);
-  }
-  const choice = data?.choices?.[0]?.message;
-  if (choice?.refusal) throw new AIError("OpenAI declined to split this transcript.");
-  let parsed;
-  try { parsed = JSON.parse(choice?.content || ""); } catch { throw new AIError("OpenAI's reply couldn't be read. Try again."); }
-  if (!Array.isArray(parsed?.scenes) || !parsed.scenes.length) throw new AIError("OpenAI didn't return any scenes. Try again.");
+  const parsed = await askJSON({
+    provider, key, model, signal, url, schema: SCHEMA, name: "scenes",
+    system: "You split long video transcripts into self-contained scenes for separate short videos. Each scene must cover one topic or segment and make sense on its own. Scenes are contiguous and together cover the whole video. Choose boundaries where the topic changes, never mid-thought. Write titles and summaries in the transcript's language.",
+    prompt: `Video length: ${mmss(duration)}. Split it into ${want}. The first scene starts at sentence 0. Return each scene's starting sentence index, a title and a one-sentence summary.\n\nTranscript (one sentence per line: [index] start time, ${names ? "speaker: " : ""}text):\n${transcriptLines(sents, provider === "claude" ? 400000 : 120000, names)}`,
+  });
+  if (!Array.isArray(parsed?.scenes) || !parsed.scenes.length) throw new AIError(`${PROVIDERS[provider].name} didn't return any scenes. Try again.`);
   return parsed.scenes;
 }
 
