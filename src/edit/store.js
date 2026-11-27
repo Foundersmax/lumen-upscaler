@@ -136,3 +136,4 @@ export async function restoreBackup({ key, meta, project }) {
   const { thumb, duration, w, h } = meta;
   return touchMeta(key, { ...summarize(project), savedAt, duration: duration || project.doc?.duration || 0, w, h, thumb, imported: Date.now() });
 }
+export const getMeta = (key) => tx("meta", "readonly", (s) => s.get(key));

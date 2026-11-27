@@ -2,18 +2,19 @@
 // a config exists, so visitors' browsers never contact Google unless sign-in is enabled.
 import { firebaseConfig } from "./config.js";
 
-// Test hook: { config, emulator } lets the suite run against the Firebase Auth emulator.
-const override = globalThis.__lumenFirebase || null;
+// Test hook: { config, emulator, firestore } lets the suite run against the Firebase emulators.
+export const override = globalThis.__lumenFirebase || null;
 const config = override?.config || firebaseConfig;
 export const authEnabled = !!config;
 
 let ready = null;
-function load() {
+/** The Firebase app and Auth (loaded on first use). */
+export function load() {
   ready ||= (async () => {
     const [{ initializeApp }, A] = await Promise.all([import("../../vendor/firebase/firebase-app.js"), import("../../vendor/firebase/firebase-auth.js")]);
-    const auth = A.getAuth(initializeApp(config));
+    const app = initializeApp(config), auth = A.getAuth(app);
     if (override?.emulator) A.connectAuthEmulator(auth, override.emulator, { disableWarnings: true });
-    return { auth, A };
+    return { app, auth, A };
   })();
   return ready;
 }

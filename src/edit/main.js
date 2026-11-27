@@ -10,7 +10,8 @@ import { aiHighlights, buildHighlights, nudgeClip } from "./highlights.js";
 import { CAPTION_STYLES, CAPTION_COLORS, DEFAULT_CAPTIONS, buildCues, mapCues, rangeMapper, drawCaptions, loadCaptionFonts } from "./captions.js";
 import { extractAudio16k, peaks as computePeaks, ASR_RATE } from "./audio.js";
 import { exportEdit, ExportCancelled } from "./export.js";
-import { getProject, putProject, projectKey, findProject, findProjectKey, listProjects, touchMeta, deleteProject, backupBlob, readBackup, restoreBackup, BACKUP_EXT } from "./store.js";
+import { authEnabled, onUser } from "../auth/auth.js";
+import { getProject, putProject, projectKey, findProject, findProjectKey, listProjects, touchMeta, getMeta, deleteProject, backupBlob, readBackup, restoreBackup, BACKUP_EXT } from "./store.js";
 import { probeClip, joinClips, mergeDocs, canCopy, joinSize } from "./join.js";
 import { voiceSegments, embedWindow, wordSpeakers, talkTime, defaultName, MAX_SPEAKERS } from "./speakers.js";
 import { QUALITY, CODEC_NAMES, RES_NAME, fmtTime, fmtBytes, even, store, targetSize, friendly, saveBlob } from "../engine/media.js";
@@ -130,17 +131,22 @@ async function refreshProjects() {
 /** Before a video is open: the recent projects, or the example transcript for first-time visitors. */
 function renderHome() {
   if (state.file) return;
-  if (!projects.length) { renderExample(); return; }
+  if (!projects.length) {
+    renderExample();
+    const sl = sync.user && syncLine(); if (sl) script.prepend(sl); // signed in: show sync progress or problems even before there's a project
+    return;
+  }
   script.hidden = false; script.textContent = "";
   const wrap = document.createElement("div"); wrap.className = "proj-home";
   const head = document.createElement("div"); head.className = "proj-head";
   const h = document.createElement("h2"); h.textContent = "Recent projects";
   head.append(h, importButton());
-  wrap.append(head, projectList(), projNote());
+  wrap.append(head, ...[syncLine()].filter(Boolean), projectList(), projNote());
   script.append(wrap);
 }
 function renderProjDlg() {
   const body = $("projDlgBody"); body.textContent = "";
+  const sl = syncLine(); if (sl) body.append(sl);
   if (!projects.length) { const p = document.createElement("p"); p.className = "help"; p.textContent = "No saved projects yet."; body.append(p); }
   else body.append(projectList());
   const acts = document.createElement("div"); acts.className = "actions"; acts.append(importButton(true));
@@ -148,7 +154,9 @@ function renderProjDlg() {
 }
 function projNote() {
   const p = document.createElement("p"); p.className = "help proj-note";
-  p.textContent = `Projects are saved in this browser (transcript and edits, not the video). To move one to another computer, download its backup (${BACKUP_EXT}) and drop it on the editor there.`;
+  p.textContent = sync.user
+    ? "Projects are saved in this browser and synced to your account: the transcript and edits, not the video. On another device, sign in and open the same video."
+    : `Projects are saved in this browser (transcript and edits, not the video). To move one to another computer, download its backup (${BACKUP_EXT}) and drop it on the editor there.`;
   return p;
 }
 function importButton(big = false) {
@@ -206,8 +214,10 @@ function projectList() {
     dl.disabled = !m.savedAt;
     if (!m.savedAt) dl.title = "Nothing to back up until the video is transcribed or edited";
     dl.onclick = () => downloadBackup(m);
-    const del = document.createElement("button"); del.type = "button"; del.className = "tool icon danger"; del.title = "Remove from this browser";
-    del.setAttribute("aria-label", `Remove ${m.name} from this browser`);
+    const del = document.createElement("button"); del.type = "button"; del.className = "tool icon danger";
+    const where = sync.user && m.synced && owned(m) ? "this browser and your account" : "this browser";
+    del.title = `Remove from ${where}`;
+    del.setAttribute("aria-label", `Remove ${m.name} from ${where}`);
     const trash = '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true"><path d="M3 4.5h10M6.5 4.5V3h3v1.5M4.5 4.5l.6 8.5h5.8l.6-8.5"/></svg>';
     del.innerHTML = trash;
     del.disabled = isOpen(m);
@@ -216,11 +226,11 @@ function projectList() {
     del.onclick = async () => {
       if (!armed) { // ask once: the button turns into "Remove?" for a few seconds
         del.classList.add("armed"); del.textContent = "Remove?"; del.setAttribute("aria-label", `Confirm: remove ${m.name}`);
-        armed = setTimeout(() => { armed = 0; del.classList.remove("armed"); del.innerHTML = trash; del.setAttribute("aria-label", `Remove ${m.name} from this browser`); }, 4000);
+        armed = setTimeout(() => { armed = 0; del.classList.remove("armed"); del.innerHTML = trash; del.setAttribute("aria-label", `Remove ${m.name} from ${where}`); }, 4000);
         return;
       }
       clearTimeout(armed);
-      await deleteProject(m.key);
+      await removeProject(m);
       announce(`Removed ${m.name}.`);
       await refreshProjects();
     };
@@ -295,6 +305,7 @@ async function importBackups(files) {
       }
       if (b.key === state.key) await flushSave();
       await restoreBackup(b);
+      queueUpload(b.key);
       done++; last = { ...b, name };
     } catch (e) { console.error(e); announce(e.message || friendly(e), true); return; }
   }
@@ -303,6 +314,130 @@ async function importBackups(files) {
   if (last.key === state.key && state.file && !busy()) { await loadFile(state.file); show("note", `Imported the backup of "${last.name}".`); return; }
   if (state.file && !projDlg.open) { renderProjDlg(); projDlg.showModal(); }
   announce(done === 1 ? `Imported "${last.name}". Click it in the list to open it with its video.` : `Imported ${done} projects. Click one to open it with its video.`);
+}
+
+/* =====================================================================
+   Project sync (signed in): projects follow the person to every device
+   ===================================================================== */
+const sync = { user: null, status: "off", msg: "", at: 0, running: null, again: false, dirty: new Set(), timer: 0, lastPull: 0 };
+const owned = (m) => !m.owner || m.owner === sync.user?.uid;
+function setSync(status, msg = "") {
+  Object.assign(sync, { status, msg }); if (status === "ok") sync.at = Date.now();
+  renderHome(); if (projDlg.open) renderProjDlg();
+}
+if (authEnabled) onUser((u) => {
+  const was = sync.user?.uid; sync.user = u;
+  if (u && u.uid !== was) syncAll();
+  else if (!u) setSync("off");
+}).catch(() => {});
+
+/** Two-way sync: newer copies win; projects removed elsewhere are removed here. */
+async function syncAll() {
+  if (!sync.user) return;
+  if (sync.running) { sync.again = true; return sync.running; }
+  sync.running = (async () => {
+    const uid = sync.user.uid;
+    setSync("syncing");
+    try {
+      const S = await import("../auth/sync.js");
+      const [remote, local] = await Promise.all([S.listRemote(uid), listProjects()]);
+      const byKey = new Map(local.map((m) => [m.key, m]));
+      let skippedOpen = false;
+      for (const r of remote) {
+        if (sync.user?.uid !== uid) return;
+        const l = byKey.get(r.key); byKey.delete(r.key);
+        if (r.deleted) {
+          if (l && (l.savedAt || 0) <= r.savedAt && l.key !== state.key) await deleteProject(l.key);
+          else if (l?.savedAt > r.savedAt && owned(l)) await pushOne(S, uid, l.key);
+          continue;
+        }
+        if (!l || (l.savedAt || 0) < r.savedAt) {
+          if (l && l.key === state.key && state.file) { skippedOpen = true; continue; } // don't swap data under the open editor
+          const p = await S.download(uid, r);
+          await putProject(r.key, p, r.savedAt);
+          await touchMeta(r.key, { name: r.name, size: r.size, duration: r.duration, w: r.w, h: r.h, thumb: r.thumb || l?.thumb, owner: uid, synced: r.savedAt });
+        } else if (l.savedAt > r.savedAt && owned(l)) await pushOne(S, uid, l.key);
+        else if (!l.owner) await touchMeta(l.key, { owner: uid, synced: r.savedAt });
+      }
+      for (const l of byKey.values()) if (l.savedAt && owned(l)) await pushOne(S, uid, l.key);
+      sync.lastPull = Date.now();
+      await refreshProjects();
+      setSync("ok", skippedOpen ? "A newer version of the open project is in your account. Open it again to load it." : "");
+    } catch (e) {
+      console.error("sync failed", e);
+      const S = await import("../auth/sync.js").catch(() => null);
+      setSync("error", S ? S.syncMessage(e) : "Couldn't sync your projects. They're still saved in this browser.");
+    } finally {
+      sync.running = null;
+      if (sync.again) { sync.again = false; syncAll(); }
+    }
+  })();
+  return sync.running;
+}
+async function pushOne(S, uid, key) {
+  const [p, m] = await Promise.all([getProject(key), getMeta(key)]);
+  if (!p || !m) return;
+  await S.upload(uid, key, p, m);
+  await touchMeta(key, { owner: uid, synced: p.savedAt });
+}
+/** After a save: upload that project a few seconds later (edits come in bursts). */
+function queueUpload(key) {
+  if (!sync.user) return;
+  sync.dirty.add(key); clearTimeout(sync.timer);
+  sync.timer = setTimeout(flushUploads, 4000);
+}
+async function flushUploads() {
+  clearTimeout(sync.timer);
+  if (!sync.user || !sync.dirty.size) return;
+  const keys = [...sync.dirty]; sync.dirty.clear();
+  const uid = sync.user.uid;
+  try {
+    const S = await import("../auth/sync.js");
+    for (const k of keys) { const m = await getMeta(k); if (m && owned(m)) await pushOne(S, uid, k); }
+    if (sync.status !== "ok" || sync.msg) setSync("ok"); else sync.at = Date.now();
+  } catch (e) {
+    for (const k of keys) sync.dirty.add(k);
+    console.error("upload failed", e);
+    const S = await import("../auth/sync.js").catch(() => null);
+    setSync("error", S ? S.syncMessage(e) : "Couldn't sync your projects.");
+  }
+}
+/** Removes a project here and, when signed in, from the account (on every device). */
+async function removeProject(m) {
+  await deleteProject(m.key);
+  if (sync.user && owned(m) && m.synced) {
+    try { const S = await import("../auth/sync.js"); await S.removeRemote(sync.user.uid, m.key, m.name); }
+    catch (e) { console.error(e); const S = await import("../auth/sync.js").catch(() => null); setSync("error", S ? S.syncMessage(e) : "Couldn't remove it from your account."); }
+  }
+}
+window.addEventListener("online", () => { if (sync.user && sync.status === "error") syncAll(); });
+document.addEventListener("visibilitychange", () => {
+  if (document.visibilityState === "hidden") flushUploads();
+  else if (sync.user && Date.now() - sync.lastPull > 60000) syncAll(); // pick up changes made on another device
+});
+
+/** The sync line shown above the project list. */
+function syncLine() {
+  if (!authEnabled) return null;
+  const p = document.createElement("p"); p.className = "proj-sync " + sync.status; p.id = "syncLine";
+  p.setAttribute("role", "status");
+  const icon = '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" aria-hidden="true"><path d="M4.5 12.5h7a3 3 0 0 0 .4-5.97A4 4 0 0 0 4.1 7.3 2.6 2.6 0 0 0 4.5 12.5z"/></svg>';
+  if (!sync.user) {
+    p.innerHTML = icon; const t = document.createElement("span"); t.textContent = "Sign in to sync your projects across devices. ";
+    const b = document.createElement("button"); b.type = "button"; b.className = "linkbtn"; b.textContent = "Sign in";
+    b.onclick = () => { projDlg.close(); $("acctBtn")?.click(); };
+    p.append(t, b);
+  } else {
+    p.innerHTML = icon; const t = document.createElement("span");
+    t.textContent = sync.status === "syncing" ? "Syncing…" : sync.status === "error" ? sync.msg
+      : sync.msg || `Synced to ${sync.user.email || "your account"}`;
+    p.append(t);
+    if (sync.status === "error") {
+      const b = document.createElement("button"); b.type = "button"; b.className = "linkbtn"; b.textContent = "Try again"; b.onclick = () => syncAll();
+      p.append(" ", b);
+    }
+  }
+  return p;
 }
 
 const isVideoFile = (f) => /^video\//.test(f.type) || /\.(mp4|m4v|mov|webm|mkv|ts|mts)$/i.test(f.name);
@@ -602,6 +737,7 @@ function afterEdit(persist = true) {
       pendingSave = null;
       const ok = await putProject(key, snapshot);
       $("saved").textContent = ok === null ? "Not saved in this browser" : "Saved";
+      if (ok !== null) queueUpload(key);
     };
     persistTimer = setTimeout(() => pendingSave?.(), 400);
   }
