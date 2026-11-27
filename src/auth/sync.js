@@ -42,8 +42,9 @@ export class SyncError extends Error {}
 export function syncMessage(e) {
   if (e instanceof SyncError) return e.message;
   const code = e?.code || "", msg = String(e?.message || "");
+  if (/has not been used|is disabled|database .*does not exist/i.test(msg)) return "Sync isn't set up yet: the Firestore database hasn't been created.";
   if (code === "permission-denied") return "Sync is blocked by your Firestore security rules. Check the rules in the Firebase console.";
-  if (/database .*does not exist|not.?found/i.test(msg) || code === "not-found") return "Sync isn't set up yet: the Firestore database hasn't been created.";
+  if (code === "not-found") return "Sync isn't set up yet: the Firestore database hasn't been created.";
   if (code === "unavailable" || !navigator.onLine) return "You're offline. Projects will sync when you're back online.";
   if (code === "resource-exhausted") return "Your Firebase project has reached its free daily limit. Sync will resume tomorrow.";
   if (code === "unauthenticated") return "Sign in again to keep syncing.";
