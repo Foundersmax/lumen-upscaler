@@ -64,6 +64,7 @@
         <div class="strip-wrap"><canvas class="strip" id="strip" aria-label="Timeline. Removed parts are hatched. Click or drag to seek."></canvas></div>
         <div class="drop" id="drop">Drop to open video</div>
         <input type="file" id="file" accept="video/*,.mkv,.mov,.webm,.mp4,.m4v,.ts" multiple hidden>
+        <input type="file" id="backupFile" accept=".wetnix,application/json" hidden>
         <input type="file" id="clipFiles" accept="video/*,.mkv,.mov,.webm,.mp4,.m4v,.ts" multiple hidden>
       </section>
       <div class="filebar" id="filebar" hidden>
@@ -71,6 +72,7 @@
         <button class="linkbtn" id="saveJoinedBtn" type="button" hidden>Save joined video</button>
         <button class="linkbtn" id="addClipsBtn" type="button">Add clips</button>
         <button class="linkbtn" id="changeBtn" type="button">Open another</button>
+        <button class="linkbtn" id="projectsBtn" type="button">Projects</button>
       </div>
       <div class="note" id="note" hidden></div>
       <div class="err" id="err" role="alert" hidden></div>
@@ -428,6 +430,14 @@
     </div>
     <p class="help" id="hlFoot" hidden>Each clip keeps your cuts and Studio voice, and uses the size and format from Export. Your browser may ask once to allow several downloads.</p>
   </div>
+</dialog>
+
+<dialog class="sheet proj-sheet" id="projDlg" aria-labelledby="projTitle">
+  <div class="sheet-head">
+    <h2 id="projTitle">Projects</h2>
+    <button class="xbtn" id="projClose" type="button" aria-label="Close"><svg viewBox="0 0 14 14" fill="none" stroke="currentColor" stroke-width="1.6"><path d="m3 3 8 8M11 3l-8 8"/></svg></button>
+  </div>
+  <div class="sheet-body" id="projDlgBody"></div>
 </dialog>
 
 <dialog class="sheet join-sheet" id="joinDlg" aria-labelledby="joinTitle">

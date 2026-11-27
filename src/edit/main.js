@@ -1,5 +1,5 @@
 // Edit page: transcript-based video editing.
-import { Input, ALL_FORMATS, BlobSource } from "../../vendor/mediabunny.min.mjs";
+import { Input, ALL_FORMATS, BlobSource, CanvasSink } from "../../vendor/mediabunny.min.mjs";
 import { Doc, sanitizeWords, normWord, mapTime, cutAt, captionCues, toSRT, toText } from "./transcript.js";
 import { analyzeBase, analyzeChain, chainKey, gainsFor } from "./enhance.js";
 import { ASPECTS, DEFAULT_REFRAME, cropGeometry, reframeSize, cropShortSide, trackFaces, buildPath, centerAt, cropAt } from "./reframe.js";
@@ -10,7 +10,7 @@ import { aiHighlights, buildHighlights, nudgeClip } from "./highlights.js";
 import { CAPTION_STYLES, CAPTION_COLORS, DEFAULT_CAPTIONS, buildCues, mapCues, rangeMapper, drawCaptions, loadCaptionFonts } from "./captions.js";
 import { extractAudio16k, peaks as computePeaks, ASR_RATE } from "./audio.js";
 import { exportEdit, ExportCancelled } from "./export.js";
-import { getProject, putProject, projectKey, findProject } from "./store.js";
+import { getProject, putProject, projectKey, findProject, findProjectKey, listProjects, touchMeta, deleteProject, backupBlob, readBackup, restoreBackup, BACKUP_EXT } from "./store.js";
 import { probeClip, joinClips, mergeDocs, canCopy, joinSize } from "./join.js";
 import { voiceSegments, embedWindow, wordSpeakers, talkTime, defaultName, MAX_SPEAKERS } from "./speakers.js";
 import { QUALITY, CODEC_NAMES, RES_NAME, fmtTime, fmtBytes, even, store, targetSize, friendly, saveBlob } from "../engine/media.js";
@@ -83,15 +83,228 @@ function scriptMessage(msg) {
 $("empty").onclick = () => pickFile();
 $("empty").onkeydown = (e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); pickFile(); } };
 $("changeBtn").onclick = () => pickFile();
-function pickFile() { if (!busy()) $("file").click(); }
-$("file").addEventListener("change", (e) => { const fs = [...e.target.files]; e.target.value = ""; openFiles(fs); });
-/** One file opens directly; several open the Join dialog. */
+let pendingPick = null;
+/** Lets the user choose files. @returns {Promise<File[]|null>} null if cancelled */
+function chooseFiles({ multiple = true } = {}) {
+  return new Promise((resolve) => {
+    pendingPick?.(null); pendingPick = resolve;
+    const input = $("file"); input.multiple = multiple;
+    input.click();
+  });
+}
+async function pickFile() {
+  if (busy()) return;
+  const files = await chooseFiles();
+  if (files) openFiles(files);
+}
+$("file").addEventListener("change", (e) => {
+  const files = [...e.target.files]; e.target.value = ""; e.target.multiple = true;
+  if (pendingPick) { const r = pendingPick; pendingPick = null; r(files); }
+  else openFiles(files);
+});
+$("file").addEventListener("cancel", () => { const r = pendingPick; pendingPick = null; r?.(null); });
+/** One file opens directly; several open the Join dialog; project backups are imported. */
 function openFiles(files) {
+  const backups = files.filter(isBackupFile);
+  if (backups.length) { importBackups(backups); return; }
   const vids = files.filter(isVideoFile);
   const list = vids.length ? vids : files.slice(0, 1);
   if (list.length > 1) openJoin(list);
   else if (list.length) loadFile(list[0]);
 }
+const isBackupFile = (f) => f.name.toLowerCase().endsWith(BACKUP_EXT);
+/* =====================================================================
+   Recent projects and backups
+   ===================================================================== */
+let projects = [];
+const projDlg = $("projDlg");
+$("projectsBtn").onclick = () => { renderProjDlg(); projDlg.showModal(); refreshProjects(); };
+$("projClose").onclick = () => projDlg.close();
+projDlg.addEventListener("click", (e) => { if (e.target === projDlg) projDlg.close(); });
+
+async function refreshProjects() {
+  projects = await listProjects().catch(() => []);
+  renderHome();
+  if (projDlg.open) renderProjDlg();
+}
+/** Before a video is open: the recent projects, or the example transcript for first-time visitors. */
+function renderHome() {
+  if (state.file) return;
+  if (!projects.length) { renderExample(); return; }
+  script.hidden = false; script.textContent = "";
+  const wrap = document.createElement("div"); wrap.className = "proj-home";
+  const head = document.createElement("div"); head.className = "proj-head";
+  const h = document.createElement("h2"); h.textContent = "Recent projects";
+  head.append(h, importButton());
+  wrap.append(head, projectList(), projNote());
+  script.append(wrap);
+}
+function renderProjDlg() {
+  const body = $("projDlgBody"); body.textContent = "";
+  if (!projects.length) { const p = document.createElement("p"); p.className = "help"; p.textContent = "No saved projects yet."; body.append(p); }
+  else body.append(projectList());
+  const acts = document.createElement("div"); acts.className = "actions"; acts.append(importButton(true));
+  body.append(acts, projNote());
+}
+function projNote() {
+  const p = document.createElement("p"); p.className = "help proj-note";
+  p.textContent = `Projects are saved in this browser (transcript and edits, not the video). To move one to another computer, download its backup (${BACKUP_EXT}) and drop it on the editor there.`;
+  return p;
+}
+function importButton(big = false) {
+  const b = document.createElement("button"); b.type = "button";
+  b.className = big ? "btn ghost" : "linkbtn"; b.textContent = "Import backup";
+  b.onclick = () => $("backupFile").click();
+  return b;
+}
+$("backupFile").addEventListener("change", (e) => { const fs = [...e.target.files]; e.target.value = ""; if (fs.length) importBackups(fs); });
+
+const ago = (t) => {
+  const s = Math.max(0, (Date.now() - t) / 1000);
+  if (s < 60) return "just now";
+  if (s < 3600) return `${Math.floor(s / 60)} min ago`;
+  if (s < 86400) return `${Math.floor(s / 3600)} h ago`;
+  if (s < 86400 * 7) { const d = Math.floor(s / 86400); return d === 1 ? "yesterday" : `${d} days ago`; }
+  return new Date(t).toLocaleDateString(undefined, { day: "numeric", month: "short", year: new Date(t).getFullYear() === new Date().getFullYear() ? undefined : "numeric" });
+};
+const isOpen = (m) => !!state.file && m.key === state.key;
+
+function projectList() {
+  const ul = document.createElement("ul"); ul.className = "proj-list";
+  for (const m of projects) {
+    const li = document.createElement("li"); li.className = "proj" + (isOpen(m) ? " current" : ""); li.dataset.key = m.key;
+    const open = document.createElement("button"); open.type = "button"; open.className = "proj-open";
+    open.setAttribute("aria-label", isOpen(m) ? `${m.name} (open now)` : `Open ${m.name}`);
+    open.disabled = isOpen(m);
+    open.onclick = () => openRecent(m);
+    const th = document.createElement("span"); th.className = "proj-thumb";
+    if (m.thumb) { const img = document.createElement("img"); img.src = m.thumb; img.alt = ""; th.append(img); }
+    else th.innerHTML = '<svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.4" aria-hidden="true"><rect x="2.5" y="4.5" width="15" height="11" rx="2"/><path d="m8.5 8 4 2-4 2z" fill="currentColor"/></svg>';
+    if (m.duration) { const d = document.createElement("span"); d.className = "proj-dur"; d.textContent = fmtTime(m.duration); th.append(d); }
+    const tx = document.createElement("span"); tx.className = "proj-text";
+    const name = document.createElement("b"); name.className = "proj-name"; name.textContent = m.name;
+    const sub = document.createElement("span"); sub.className = "proj-sub";
+    const bits = [];
+    if (m.words) {
+      bits.push(`${m.words.toLocaleString()} words`);
+      if (m.transcribed < 0.995) bits.push(`${Math.floor(m.transcribed * 100)}% transcribed`);
+      if (m.cutWords >= 0.5) bits.push(`${fmtTime(m.cutWords)} cut`);
+    } else bits.push("Not transcribed yet");
+    if (m.highlights) bits.push(`${m.highlights} highlight${m.highlights === 1 ? "" : "s"}`);
+    if (m.scenes) bits.push(`${m.scenes} scenes`);
+    if (m.speakers) bits.push(`${m.speakers} speaker${m.speakers === 1 ? "" : "s"}`);
+    sub.textContent = bits.join(" · ");
+    const when = document.createElement("span"); when.className = "proj-when";
+    const at = Math.max(m.savedAt || 0, m.openedAt || 0);
+    when.textContent = isOpen(m) ? "Open now" : at ? `${m.savedAt >= (m.openedAt || 0) ? "Edited" : "Opened"} ${ago(at)}` : "";
+    tx.append(name, sub, when);
+    open.append(th, tx);
+    const acts = document.createElement("span"); acts.className = "proj-acts";
+    const dl = document.createElement("button"); dl.type = "button"; dl.className = "tool icon"; dl.title = "Download backup";
+    dl.setAttribute("aria-label", `Download backup of ${m.name}`);
+    dl.innerHTML = '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true"><path d="M8 2.5v8M4.5 7 8 10.5 11.5 7"/><path d="M2.5 11v1.5A1.5 1.5 0 0 0 4 14h8a1.5 1.5 0 0 0 1.5-1.5V11"/></svg>';
+    dl.disabled = !m.savedAt;
+    if (!m.savedAt) dl.title = "Nothing to back up until the video is transcribed or edited";
+    dl.onclick = () => downloadBackup(m);
+    const del = document.createElement("button"); del.type = "button"; del.className = "tool icon danger"; del.title = "Remove from this browser";
+    del.setAttribute("aria-label", `Remove ${m.name} from this browser`);
+    const trash = '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true"><path d="M3 4.5h10M6.5 4.5V3h3v1.5M4.5 4.5l.6 8.5h5.8l.6-8.5"/></svg>';
+    del.innerHTML = trash;
+    del.disabled = isOpen(m);
+    if (isOpen(m)) del.title = "Open another video to remove this one";
+    let armed = 0;
+    del.onclick = async () => {
+      if (!armed) { // ask once: the button turns into "Remove?" for a few seconds
+        del.classList.add("armed"); del.textContent = "Remove?"; del.setAttribute("aria-label", `Confirm: remove ${m.name}`);
+        armed = setTimeout(() => { armed = 0; del.classList.remove("armed"); del.innerHTML = trash; del.setAttribute("aria-label", `Remove ${m.name} from this browser`); }, 4000);
+        return;
+      }
+      clearTimeout(armed);
+      await deleteProject(m.key);
+      announce(`Removed ${m.name}.`);
+      await refreshProjects();
+    };
+    acts.append(dl, del);
+    li.append(open, acts);
+    ul.append(li);
+  }
+  return ul;
+}
+/** Messages for the Projects views go to the dialog when it's open, otherwise to the page note. */
+function announce(msg, isErr = false) {
+  if (projDlg.open) {
+    let el = $("projMsg");
+    if (!el) { el = document.createElement("div"); el.id = "projMsg"; $("projDlgBody").prepend(el); }
+    el.className = isErr ? "err" : "note"; el.setAttribute("role", isErr ? "alert" : "status"); el.hidden = false; el.textContent = msg;
+  } else { show(isErr ? "err" : "note", msg); if (isErr) show("note", ""); }
+}
+
+/** Reopens a recent project by asking for its video. (Keeping file handles for one-click reopening was left
+ *  out: in testing, reading a stored handle back crashed Chrome 153 in private-style profiles.) */
+async function openRecent(m) {
+  if (busy()) { announce("Finish or cancel the current task before opening another video.", true); return; }
+  announce(`Choose "${m.name}" to reopen this project.`);
+  const f = (await chooseFiles({ multiple: false }))?.[0];
+  if (!f) { announce(""); return; }
+  if (f.name !== m.name || f.size !== m.size) {
+    announce(`That's "${f.name}". To reopen this project, choose "${m.name}" (${fmtBytes(m.size)}), the video it was made from.`, true);
+    return;
+  }
+  projDlg.close();
+  await loadFile(f);
+}
+
+/** Records that a video was opened, for the Recent list (with a thumbnail). */
+async function noteOpened(file) {
+  const key = state.key;
+  const meta = await touchMeta(key, { name: file.name, size: file.size, lastModified: file.lastModified, duration: state.duration, w: state.srcW, h: state.srcH, openedAt: Date.now() }).catch(() => null);
+  if (meta && !meta.thumb) {
+    const thumb = await makeThumb().catch(() => null);
+    if (thumb && state.key === key) await touchMeta(key, { thumb }).catch(() => {});
+  }
+  refreshProjects();
+}
+/** A small JPEG of a frame near the start, for the Recent list. */
+async function makeThumb() {
+  const vt = await state.input.getPrimaryVideoTrack();
+  const sink = new CanvasSink(vt, { width: 192, height: 108, fit: "cover", poolSize: 1 });
+  const r = await sink.getCanvas(Math.min(state.duration * 0.1, 5));
+  if (!r) return null;
+  const c = r.canvas;
+  const blob = c.convertToBlob ? await c.convertToBlob({ type: "image/jpeg", quality: 0.72 }) : await new Promise((res) => c.toBlob(res, "image/jpeg", 0.72));
+  return blob && new Promise((res) => { const fr = new FileReader(); fr.onload = () => res(fr.result); fr.onerror = () => res(null); fr.readAsDataURL(blob); });
+}
+
+async function downloadBackup(m) {
+  try {
+    if (m.key === state.key) await flushSave();
+    const blob = await backupBlob(m.key);
+    await saveBlob(blob, m.name.replace(/\.[^.]+$/, "").replace(/[\\/:*?"<>|]+/g, "_").slice(0, 120) + BACKUP_EXT);
+  } catch (e) { console.error(e); announce(e.message || friendly(e), true); }
+}
+
+async function importBackups(files) {
+  let done = 0, last = null;
+  for (const f of files) {
+    try {
+      const b = await readBackup(f);
+      const name = b.meta.name || b.key.split("|")[0];
+      if (b.existing && (b.existing.savedAt || 0) > (b.project.savedAt || 0)) {
+        const when = (t) => new Date(t).toLocaleString(undefined, { dateStyle: "medium", timeStyle: "short" });
+        if (!confirm(`This browser has newer edits for "${name}" (${when(b.existing.savedAt)}) than the backup (${when(b.project.savedAt || 0)}).\n\nReplace them with the backup?`)) continue;
+      }
+      if (b.key === state.key) await flushSave();
+      await restoreBackup(b);
+      done++; last = { ...b, name };
+    } catch (e) { console.error(e); announce(e.message || friendly(e), true); return; }
+  }
+  if (!done) return;
+  await refreshProjects();
+  if (last.key === state.key && state.file && !busy()) { await loadFile(state.file); show("note", `Imported the backup of "${last.name}".`); return; }
+  if (state.file && !projDlg.open) { renderProjDlg(); projDlg.showModal(); }
+  announce(done === 1 ? `Imported "${last.name}". Click it in the list to open it with its video.` : `Imported ${done} projects. Click one to open it with its video.`);
+}
+
 const isVideoFile = (f) => /^video\//.test(f.type) || /\.(mp4|m4v|mov|webm|mkv|ts|mts)$/i.test(f.name);
 
 let dragDepth = 0;
@@ -147,7 +360,11 @@ async function loadFile(file) {
     updateResOptions();
 
     state.audioJob?.abort(); state.audioJob = null; state.rfJob?.abort(); state.rfJob = null;
-    const saved = await findProject(file);
+    // a copy of a file opened before (same name and size) continues that project rather than starting a second one
+    const foundKey = await findProjectKey(file);
+    if (foundKey) state.key = foundKey;
+    const saved = foundKey ? await getProject(foundKey) : null;
+    noteOpened(file);
     if (saved?.audioFx) state.audioFx = { ...DEFAULT_AUDIO, ...saved.audioFx };
     if (saved?.audioBase?.profile?.power) { state.audioBase = saved.audioBase; state.chainLufs = saved.chainLufs || {}; }
     syncAudioUI(); configurePreview();
@@ -366,6 +583,9 @@ function edit(fn) {
 function undo() { const d = state.doc; if (!d || !state.undo.length || state.exporting) return; state.redo.push(d.snapshot()); d.restore(state.undo.pop()); afterEdit(); }
 function redo() { const d = state.doc; if (!d || !state.redo.length || state.exporting) return; state.undo.push(d.snapshot()); d.restore(state.redo.pop()); afterEdit(); }
 
+let pendingSave = null;
+/** Saves now if a save is waiting (before a backup is made from the project). */
+async function flushSave() { clearTimeout(persistTimer); await pendingSave?.(); }
 let persistTimer = 0;
 function afterEdit(persist = true) {
   const doc = state.doc;
@@ -378,10 +598,12 @@ function afterEdit(persist = true) {
     clearTimeout(persistTimer);
     $("saved").textContent = "Saving…";
     const key = state.key, snapshot = { doc: doc ? doc.toJSON() : null, peaks: state.peaks, captions: state.captions, audioFx: state.audioFx, audioBase: state.audioBase, chainLufs: state.chainLufs, reframe: state.reframe, faceSamples: state.faceSamples, scenes: state.scenes, highlights: state.highlights, speakers: state.speakers };
-    persistTimer = setTimeout(async () => {
+    pendingSave = async () => {
+      pendingSave = null;
       const ok = await putProject(key, snapshot);
       $("saved").textContent = ok === null ? "Not saved in this browser" : "Saved";
-    }, 400);
+    };
+    persistTimer = setTimeout(() => pendingSave?.(), 400);
   }
 }
 
@@ -1850,7 +2072,7 @@ window.addEventListener("beforeunload", (e) => { if (busy()) { e.preventDefault(
    Boot
    ===================================================================== */
 if (checkSupport()) {
-  renderExample(); drawStrip(); setToolsEnabled();
+  renderExample(); refreshProjects(); drawStrip(); setToolsEnabled();
   buildCaptionUI(); syncCaptionUI(); drawStyleTiles(); syncReframeUI();
   loadCaptionFonts().then(() => { drawStyleTiles(); drawCapOverlay(); });
 }
